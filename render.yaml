@@ -1,0 +1,7 @@
+services:
+  - type: web
+    name: terminal-boursier
+    env: python
+    plan: free
+    buildCommand: ""
+    startCommand: "python server.py"

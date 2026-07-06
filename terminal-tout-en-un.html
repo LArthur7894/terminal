@@ -1,0 +1,2446 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>TERMINAL — Suivi boursier personnel</title>
+
+  <!-- Police monospace IBM Plex Mono (chiffres et données) + IBM Plex Sans (textes) -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+
+  <!-- Chart.js pour le camembert de répartition (onglet Positions) -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+
+  <style>
+/* ============================================================
+   TERMINAL — Thème sombre façon terminal de trading
+   Palette : noir/anthracite + accent ambre (référence Bloomberg)
+   ============================================================ */
+
+:root {
+  /* Couleurs */
+  --bg:          #0b0d10;   /* fond principal, presque noir */
+  --bg-panel:    #12161b;   /* panneaux / cartes */
+  --bg-raised:   #1a2028;   /* lignes de tableau au survol, inputs */
+  --border:      #262d36;   /* bordures fines */
+  --text:        #d7dde3;   /* texte principal */
+  --text-dim:    #7b8794;   /* texte secondaire */
+  --amber:       #ffb000;   /* accent ambre Bloomberg */
+  --amber-dim:   #b87f0a;
+  --green:       #2ecc71;   /* hausse / achat */
+  --red:         #ff4d4d;   /* baisse / vente */
+  --blue:        #4aa8ff;   /* neutre / info */
+
+  /* Typo */
+  --mono: "IBM Plex Mono", "Consolas", "Menlo", monospace;
+  --sans: "IBM Plex Sans", system-ui, sans-serif;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+/* Tous les chiffres et données en monospace */
+.num, .quota-value, .tape-track, .data-table td, .slider-value,
+.impact-grid dd, #api-key-input, input[type="number"], input[type="text"] {
+  font-family: var(--mono);
+}
+
+/* Focus clavier visible partout */
+:focus-visible {
+  outline: 2px solid var(--amber);
+  outline-offset: 2px;
+}
+
+.sr-only {
+  position: absolute; width: 1px; height: 1px;
+  overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap;
+}
+
+.hidden { display: none !important; }
+.muted { color: var(--text-dim); font-weight: 400; font-size: 0.8em; }
+
+/* ============================= HEADER ============================= */
+
+.terminal-header {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  background: #07090b;
+  border-bottom: 1px solid var(--border);
+}
+
+.header-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 16px;
+  flex-wrap: wrap;
+}
+
+.brand { display: flex; align-items: baseline; gap: 8px; }
+.brand-mark { color: var(--amber); letter-spacing: -2px; }
+.brand-name {
+  font-family: var(--mono);
+  font-weight: 700;
+  letter-spacing: 3px;
+  color: var(--amber);
+}
+.brand-sub {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-dim);
+  letter-spacing: 1px;
+}
+
+.header-right { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+
+/* Compteur de quota — toujours visible */
+.quota-box {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 4px 10px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg-panel);
+}
+.quota-label { font-size: 11px; color: var(--text-dim); letter-spacing: 1px; }
+.quota-value { font-weight: 700; color: var(--green); }
+.quota-value.low  { color: var(--amber); }
+.quota-value.zero { color: var(--red); }
+.quota-suffix { font-size: 11px; color: var(--text-dim); }
+
+/* Bandeau défilant façon Bloomberg */
+.ticker-tape {
+  overflow: hidden;
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  background: #000;
+  height: 30px;
+  display: flex;
+  align-items: center;
+}
+.tape-track {
+  display: inline-flex;
+  gap: 32px;
+  white-space: nowrap;
+  padding-left: 100%;
+  animation: tape-scroll 40s linear infinite;
+  font-size: 13px;
+}
+.ticker-tape:hover .tape-track { animation-play-state: paused; }
+@keyframes tape-scroll {
+  from { transform: translateX(0); }
+  to   { transform: translateX(-100%); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .tape-track { animation: none; padding-left: 16px; }
+}
+.tape-item .t-sym { color: var(--amber); font-weight: 600; }
+.tape-item .t-px  { color: var(--text); margin-left: 6px; }
+.tape-item .up    { color: var(--green); margin-left: 6px; }
+.tape-item .down  { color: var(--red);   margin-left: 6px; }
+.tape-empty { color: var(--text-dim); font-style: italic; padding-left: 16px; }
+
+/* Onglets */
+.tabs { display: flex; overflow-x: auto; }
+.tab {
+  flex: 0 0 auto;
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--text-dim);
+  font-family: var(--mono);
+  font-size: 12px;
+  letter-spacing: 1px;
+  padding: 10px 18px;
+  cursor: pointer;
+}
+.tab:hover { color: var(--text); }
+.tab.active {
+  color: var(--amber);
+  border-bottom-color: var(--amber);
+}
+
+/* ============================= LAYOUT ============================= */
+
+main { padding: 20px 16px 60px; max-width: 1280px; margin: 0 auto; }
+
+.panel[hidden] { display: none; }
+
+.panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+  margin-bottom: 16px;
+}
+h1 { font-size: 18px; margin: 0; font-weight: 600; }
+h2 { font-size: 14px; margin: 0 0 10px; font-weight: 600; color: var(--text-dim); text-transform: uppercase; letter-spacing: 1px; }
+
+.hint { color: var(--text-dim); font-size: 12px; }
+.hint a { color: var(--amber); }
+
+/* ============================= FORMULAIRES ============================= */
+
+.inline-form { display: flex; gap: 8px; flex-wrap: wrap; }
+
+input[type="text"], input[type="number"] {
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text);
+  padding: 7px 10px;
+  font-size: 13px;
+  min-width: 0;
+}
+input::placeholder { color: var(--text-dim); }
+#input-ticker, #pos-ticker { width: 220px; }
+
+/* ============================= AUTOCOMPLETE (recherche d'entreprise) ============================= */
+
+.autocomplete-wrap { position: relative; }
+
+.suggestions-dropdown {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  z-index: 40;
+  list-style: none;
+  margin: 0;
+  padding: 4px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  max-height: 280px;
+  overflow-y: auto;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+}
+
+.suggestion-item {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 7px 9px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 13px;
+}
+.suggestion-item:hover,
+.suggestion-item.highlighted { background: var(--bg-panel); }
+.suggestion-item .s-symbol { font-family: var(--mono); font-weight: 700; color: var(--amber); flex: 0 0 auto; }
+.suggestion-item .s-name { color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1 1 auto; }
+.suggestion-item .s-exchange { color: var(--text-dim); font-size: 11px; flex: 0 0 auto; }
+.suggestion-empty, .suggestion-loading {
+  padding: 8px 9px;
+  color: var(--text-dim);
+  font-size: 12px;
+  font-style: italic;
+}
+#pos-qty, #pos-pru { width: 100px; }
+
+.btn {
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 7px 14px;
+  font-family: var(--mono);
+  font-size: 12px;
+  cursor: pointer;
+  background: var(--bg-raised);
+  color: var(--text);
+}
+.btn:hover { border-color: var(--amber-dim); }
+.btn-accent {
+  background: var(--amber);
+  border-color: var(--amber);
+  color: #14100a;
+  font-weight: 600;
+}
+.btn-accent:hover { background: #ffc23d; }
+.btn-ghost { background: transparent; }
+.btn-small { padding: 4px 8px; font-size: 11px; }
+.btn-danger { color: var(--red); }
+.btn:disabled { opacity: 0.45; cursor: not-allowed; }
+
+/* ============================= TABLEAUX ============================= */
+
+.table-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-panel);
+}
+
+.data-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.data-table th, .data-table td { padding: 9px 12px; text-align: left; white-space: nowrap; }
+.data-table th {
+  font-family: var(--mono);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: var(--text-dim);
+  border-bottom: 1px solid var(--border);
+  background: #0e1216;
+}
+.data-table td { border-bottom: 1px solid #1a2028; }
+.data-table tbody tr:hover { background: var(--bg-raised); }
+.data-table .num, .data-table th.num { text-align: right; }
+.actions-col { text-align: right; }
+.data-table td.actions-col { display: flex; gap: 6px; justify-content: flex-end; }
+
+.total-row td {
+  font-family: var(--mono);
+  font-weight: 700;
+  border-top: 2px solid var(--border);
+  border-bottom: none;
+  background: #0e1216;
+}
+
+.up   { color: var(--green); }
+.down { color: var(--red); }
+.na   { color: var(--text-dim); }
+
+/* Cellule ticker */
+.cell-ticker { font-family: var(--mono); font-weight: 700; color: var(--amber); }
+.stale-badge {
+  font-size: 10px; color: var(--text-dim);
+  border: 1px solid var(--border); border-radius: 3px;
+  padding: 0 4px; margin-left: 6px; vertical-align: middle;
+}
+
+/* Signal */
+.signal { font-family: var(--mono); font-weight: 700; padding: 2px 8px; border-radius: 3px; font-size: 12px; }
+.signal-achat   { color: var(--green); border: 1px solid var(--green); }
+.signal-vente   { color: var(--red);   border: 1px solid var(--red); }
+.signal-neutre  { color: var(--blue);  border: 1px solid var(--blue); }
+
+/* Barre de score 0–100 */
+.score-cell { display: flex; align-items: center; gap: 8px; justify-content: flex-end; }
+.score-bar { width: 60px; height: 6px; background: #20262e; border-radius: 3px; overflow: hidden; }
+.score-fill { height: 100%; background: var(--amber); }
+
+/* Mini range 52 semaines */
+.range52 { display: flex; align-items: center; gap: 6px; font-family: var(--mono); font-size: 11px; }
+.range-bar { position: relative; width: 90px; height: 6px; background: #20262e; border-radius: 3px; }
+.range-dot {
+  position: absolute; top: -2px; width: 10px; height: 10px;
+  background: var(--amber); border-radius: 50%; transform: translateX(-50%);
+}
+
+/* ============================= POSITIONS ============================= */
+
+.positions-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1.6fr) minmax(260px, 1fr);
+  gap: 16px;
+  align-items: start;
+}
+
+.chart-card {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 14px;
+}
+.chart-holder { position: relative; height: 260px; }
+
+/* ============================= SIMULATEUR D'ACHAT (mise en page) ============================= */
+
+.scenario-layout {
+  display: grid;
+  grid-template-columns: minmax(280px, 1fr) minmax(0, 1.4fr);
+  gap: 16px;
+  align-items: start;
+}
+
+.slider-card {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 12px 14px;
+  margin-bottom: 10px;
+}
+
+.scenario-result {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 14px;
+}
+.impact-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  gap: 10px;
+  margin: 0 0 14px;
+}
+.impact-grid dt { font-size: 11px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 1px; }
+.impact-grid dd { margin: 2px 0 0; font-size: 17px; font-weight: 700; }
+
+/* ============================= MEILLEURES OPPORTUNITÉS (AUTO) ============================= */
+
+.autopick-card {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--amber);
+  border-radius: 6px;
+  padding: 14px 16px;
+  margin-bottom: 16px;
+}
+.autopick-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.autopick-head h2 { margin: 0; }
+.autopick-meta { font-family: var(--mono); font-size: 11px; color: var(--text-dim); }
+.autopick-body { display: flex; flex-wrap: wrap; gap: 10px; }
+.autopick-empty { color: var(--text-dim); font-style: italic; font-size: 13px; margin: 0; }
+.autopick-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 12px;
+}
+.autopick-item .ap-rank { font-family: var(--mono); color: var(--text-dim); font-size: 11px; }
+.autopick-item .ap-ticker { font-family: var(--mono); font-weight: 700; color: var(--amber); font-size: 15px; }
+.autopick-item .ap-score { font-family: var(--mono); font-weight: 700; }
+
+/* ============================= SIMULATEUR D'ACHAT ============================= */
+
+.buysim-form { display: flex; flex-direction: column; gap: 4px; }
+.buysim-form label { font-size: 13px; margin-top: 8px; }
+.buysim-form button { margin-top: 12px; }
+.analysis-stats { margin: 0 0 12px; }
+
+/* ============================= ANALYSE ============================= */
+
+.analysis-container { display: grid; gap: 14px; }
+.analysis-card {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--amber);
+  border-radius: 6px;
+  padding: 14px 16px;
+}
+.analysis-card h3 {
+  margin: 0 0 8px;
+  font-family: var(--mono);
+  color: var(--amber);
+  font-size: 15px;
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+}
+.analysis-card p { margin: 0 0 8px; color: var(--text); font-size: 13px; }
+.analysis-card .meta { font-family: var(--mono); font-size: 11px; color: var(--text-dim); }
+.analysis-empty { color: var(--text-dim); font-style: italic; }
+
+.analysis-chart-wrap { margin: 4px 0 12px; }
+.chart-periods { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 8px; }
+.analysis-chart-holder { height: 220px; }
+
+/* ============================= DISCLAIMER ============================= */
+
+.disclaimer {
+  position: fixed;
+  bottom: 0; left: 0; right: 0;
+  background: #1a1408;
+  border-top: 1px solid var(--amber-dim);
+  color: var(--amber);
+  font-size: 12px;
+  text-align: center;
+  padding: 7px 12px;
+  z-index: 30;
+}
+
+/* ============================= TOASTS ============================= */
+
+.toast-zone {
+  position: fixed;
+  top: 12px; right: 12px;
+  z-index: 50;
+  display: flex; flex-direction: column; gap: 8px;
+  max-width: 380px;
+}
+.toast {
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--blue);
+  border-radius: 4px;
+  padding: 10px 12px;
+  font-size: 13px;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.5);
+}
+.toast-error   { border-left-color: var(--red); }
+.toast-warn    { border-left-color: var(--amber); }
+.toast-success { border-left-color: var(--green); }
+
+/* ============================= MODALE ============================= */
+
+.settings-dialog {
+  background: var(--bg-panel);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 20px;
+  max-width: 440px;
+  width: calc(100% - 32px);
+}
+.settings-dialog::backdrop { background: rgba(0,0,0,0.7); }
+.settings-dialog h2 { color: var(--amber); }
+.settings-dialog label { display: block; margin: 12px 0 4px; font-size: 13px; }
+.settings-dialog input { width: 100%; }
+.dialog-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; }
+
+/* ============================= RESPONSIVE ============================= */
+
+@media (max-width: 900px) {
+  .positions-layout, .scenario-layout { grid-template-columns: 1fr; }
+}
+@media (max-width: 600px) {
+  .header-top { flex-direction: column; align-items: flex-start; }
+  .panel-head { flex-direction: column; align-items: flex-start; }
+  main { padding-bottom: 90px; }
+}
+
+/* ============================= CHOIX DE LA SOURCE (modale) ============================= */
+
+.source-fieldset {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px 12px;
+  margin: 0 0 12px;
+  display: grid;
+  gap: 10px;
+}
+.source-option {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  font-size: 13px;
+  cursor: pointer;
+}
+.source-option input { accent-color: var(--amber); margin-top: 3px; }
+.source-option code {
+  font-family: var(--mono);
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 0 4px;
+}
+
+</style>
+</head>
+<body>
+
+  <!-- ======================= HEADER ======================= -->
+  <header class="terminal-header">
+    <div class="header-top">
+      <div class="brand">
+        <span class="brand-mark">▮▮</span>
+        <span class="brand-name">TERMINAL</span>
+        <span class="brand-sub">US · EU EQUITIES</span>
+      </div>
+
+      <div class="header-right">
+        <!-- Compteur de quota API — toujours visible -->
+        <div class="quota-box" id="quota-box" title="Quota Alpha Vantage gratuit : 25 requêtes / jour, remise à zéro à minuit UTC">
+          <span class="quota-label">API</span>
+          <span class="quota-value" id="quota-value">25/25</span>
+          <span class="quota-suffix">req. restantes</span>
+        </div>
+
+        <button class="btn btn-ghost" id="btn-settings" aria-haspopup="dialog">⚙ Source &amp; clé API</button>
+      </div>
+    </div>
+
+    <!-- Bandeau défilant façon Bloomberg -->
+    <div class="ticker-tape" id="ticker-tape" aria-hidden="true">
+      <div class="tape-track" id="tape-track">
+        <span class="tape-empty">— Ajoutez des tickers à la watchlist puis lancez une analyse pour alimenter le bandeau —</span>
+      </div>
+    </div>
+
+    <!-- Navigation par onglets -->
+    <nav class="tabs" role="tablist" aria-label="Sections du terminal">
+      <button class="tab active" role="tab" aria-selected="true"  aria-controls="panel-dashboard" id="tab-dashboard" data-tab="dashboard">F1 · DASHBOARD</button>
+      <button class="tab" role="tab" aria-selected="false" aria-controls="panel-positions" id="tab-positions" data-tab="positions">F2 · POSITIONS</button>
+      <button class="tab" role="tab" aria-selected="false" aria-controls="panel-buysim" id="tab-buysim" data-tab="buysim">F3 · SIMULATEUR</button>
+      <button class="tab" role="tab" aria-selected="false" aria-controls="panel-analyse"   id="tab-analyse"   data-tab="analyse">F4 · ANALYSE</button>
+      <button class="tab" role="tab" aria-selected="false" aria-controls="panel-marche" id="tab-marche" data-tab="marche">F5 · MARCHÉ</button>
+      <button class="tab" role="tab" aria-selected="false" aria-controls="panel-allocation" id="tab-allocation" data-tab="allocation">F6 · ALLOCATION</button>
+    </nav>
+  </header>
+
+  <!-- Zone de messages (erreurs, confirmations) -->
+  <div class="toast-zone" id="toast-zone" aria-live="polite"></div>
+
+  <main>
+
+    <!-- ======================= ONGLET 1 : DASHBOARD ======================= -->
+    <section class="panel active" id="panel-dashboard" role="tabpanel" aria-labelledby="tab-dashboard">
+      <div class="panel-head">
+        <h1>Opportunités <span class="muted">/ watchlist (illimitée)</span></h1>
+        <form class="inline-form" id="form-add-ticker">
+          <div class="autocomplete-wrap">
+            <label class="sr-only" for="input-ticker">Rechercher une entreprise ou un ticker à ajouter</label>
+            <input type="text" id="input-ticker" placeholder="Ex. Apple, LVMH, AAPL, MC.PA…" maxlength="60" autocomplete="off" role="combobox" aria-expanded="false" aria-controls="ticker-suggestions" aria-autocomplete="list">
+            <ul class="suggestions-dropdown hidden" id="ticker-suggestions" role="listbox"></ul>
+          </div>
+          <button type="submit" class="btn btn-accent">+ Ajouter</button>
+        </form>
+      </div>
+
+      <div class="autopick-card" id="autopick-card">
+        <div class="autopick-head">
+          <h2>Meilleures opportunités <span class="muted">— sélection auto, rafraîchie toutes les heures</span></h2>
+          <span class="autopick-meta" id="autopick-meta">—</span>
+        </div>
+        <div id="autopick-body" class="autopick-body"></div>
+      </div>
+
+      <div class="table-wrap">
+        <table class="data-table" id="watchlist-table">
+          <thead>
+            <tr>
+              <th>Ticker</th>
+              <th class="num">Cours</th>
+              <th class="num">Var. %</th>
+              <th class="num">RSI 14</th>
+              <th class="num">SMA 50</th>
+              <th class="num">SMA 200</th>
+              <th>Range 52 sem.</th>
+              <th class="num">Score</th>
+              <th>Signal</th>
+              <th>MàJ</th>
+              <th class="actions-col">Actions</th>
+            </tr>
+          </thead>
+          <tbody id="watchlist-body">
+            <!-- Rempli par app.js -->
+          </tbody>
+        </table>
+      </div>
+
+      <p class="hint">
+        Chaque clic sur <strong>Analyser</strong> déclenche <strong>1 requête</strong> vers la source choisie — Yahoo Finance (gratuit, sans quota, via server.py) ou Alpha Vantage (25/jour).
+        Tous les indicateurs — RSI, SMA 50/200, range 52 semaines, score — sont ensuite calculés localement, sans autre appel.
+        Les données restent en cache si le quota est épuisé.
+      </p>
+    </section>
+
+    <!-- ======================= ONGLET 2 : POSITIONS ======================= -->
+    <section class="panel" id="panel-positions" role="tabpanel" aria-labelledby="tab-positions" hidden>
+      <div class="panel-head">
+        <h1>Mes positions</h1>
+        <form class="inline-form" id="form-add-position">
+          <div class="autocomplete-wrap">
+            <label class="sr-only" for="pos-ticker">Entreprise ou ticker</label>
+            <input type="text" id="pos-ticker" placeholder="Entreprise ou ticker" maxlength="60" required autocomplete="off" role="combobox" aria-expanded="false" aria-controls="pos-ticker-suggestions" aria-autocomplete="list">
+            <ul class="suggestions-dropdown hidden" id="pos-ticker-suggestions" role="listbox"></ul>
+          </div>
+          <label class="sr-only" for="pos-qty">Quantité</label>
+          <input type="number" id="pos-qty" placeholder="Qté" min="0" step="any" required>
+          <label class="sr-only" for="pos-pru">PRU</label>
+          <input type="number" id="pos-pru" placeholder="PRU" min="0" step="any" required>
+          <button type="submit" class="btn btn-accent" id="btn-position-submit">+ Ajouter</button>
+          <button type="button" class="btn btn-ghost hidden" id="btn-position-cancel">Annuler</button>
+        </form>
+      </div>
+
+      <div class="positions-layout">
+        <div class="table-wrap">
+          <table class="data-table" id="positions-table">
+            <thead>
+              <tr>
+                <th>Ticker</th>
+                <th class="num">Qté</th>
+                <th class="num">PRU</th>
+                <th class="num">Cours</th>
+                <th class="num">Valeur</th>
+                <th class="num">P&amp;L</th>
+                <th class="num">P&amp;L %</th>
+                <th class="actions-col">Actions</th>
+              </tr>
+            </thead>
+            <tbody id="positions-body"></tbody>
+            <tfoot>
+              <tr class="total-row" id="positions-total-row">
+                <td>TOTAL</td>
+                <td></td><td></td><td></td>
+                <td class="num" id="total-value">—</td>
+                <td class="num" id="total-pnl">—</td>
+                <td class="num" id="total-pnl-pct">—</td>
+                <td></td>
+              </tr>
+            </tfoot>
+          </table>
+        </div>
+
+        <div class="chart-card">
+          <h2>Répartition du portefeuille</h2>
+          <div class="chart-holder">
+            <canvas id="allocation-chart" aria-label="Camembert de répartition du portefeuille par ligne" role="img"></canvas>
+          </div>
+          <p class="hint" id="chart-hint">Le cours utilisé est le dernier cours en cache (onglet Dashboard → Analyser). À défaut, le PRU est utilisé.</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- ======================= ONGLET 3 : SIMULATEUR D'ACHAT ======================= -->
+    <section class="panel" id="panel-buysim" role="tabpanel" aria-labelledby="tab-buysim" hidden>
+      <div class="panel-head">
+        <h1>Simulateur d'achat <span class="muted">/ visualisez l'impact d'un futur achat avant de passer l'ordre</span></h1>
+      </div>
+
+      <div class="scenario-layout">
+        <div class="slider-card">
+          <form id="form-buysim" class="buysim-form">
+            <div class="autocomplete-wrap">
+              <label for="buysim-ticker">Ticker (position existante ou nouvelle)</label>
+              <input type="text" id="buysim-ticker" placeholder="Ex. Apple, MC.PA, AAPL…" maxlength="60" autocomplete="off" required role="combobox" aria-expanded="false" aria-controls="buysim-suggestions" aria-autocomplete="list">
+              <ul class="suggestions-dropdown hidden" id="buysim-suggestions" role="listbox"></ul>
+            </div>
+            <label for="buysim-amount">Montant à investir</label>
+            <input type="number" id="buysim-amount" min="1" step="any" placeholder="Ex. 2000">
+            <button type="submit" class="btn btn-accent">Simuler l'achat</button>
+          </form>
+          <p class="hint">Le prix utilisé est le dernier cours en cache. S'il manque, une analyse est déclenchée automatiquement (1 requête).</p>
+        </div>
+
+        <div class="scenario-result" id="buysim-result">
+          <p class="analysis-empty">Choisissez un ticker et un montant pour voir l'impact simulé sur votre portefeuille.</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- ======================= ONGLET 4 : ANALYSE ======================= -->
+    <section class="panel" id="panel-analyse" role="tabpanel" aria-labelledby="tab-analyse" hidden>
+      <div class="panel-head">
+        <h1>Synthèse par ticker</h1>
+        <button class="btn btn-ghost" id="btn-refresh-analysis">↻ Régénérer depuis le cache</button>
+      </div>
+      <div id="analysis-container" class="analysis-container"></div>
+    </section>
+
+    <!-- ======================= ONGLET 5 : MARCHÉ ======================= -->
+    <section class="panel" id="panel-marche" role="tabpanel" aria-labelledby="tab-marche" hidden>
+      <div class="panel-head">
+        <h1>Meilleures actions du marché <span class="muted">/ grandes capitalisations mondiales, classées par score technique</span></h1>
+        <button class="btn btn-accent" id="btn-market-scan">Scanner le marché</button>
+      </div>
+      <p class="hint" id="market-status">Aucun scan encore lancé.</p>
+      <div class="table-wrap">
+        <table class="data-table" id="market-table">
+          <thead>
+            <tr>
+              <th>Rang</th>
+              <th>Ticker</th>
+              <th>Entreprise</th>
+              <th class="num">Cours</th>
+              <th class="num">Score</th>
+              <th>Signal</th>
+              <th class="num">Perf. 1 an</th>
+              <th class="actions-col">Actions</th>
+            </tr>
+          </thead>
+          <tbody id="market-body">
+            <tr><td colspan="8" class="na">Lancez un scan pour voir les meilleures opportunités du marché.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="hint">
+        Sélection curatée d'environ 150 grandes capitalisations mondiales (Amérique du Nord, Europe, Asie), tous secteurs confondus —
+        pas un classement exhaustif et vérifié des 3000 premières capitalisations mondiales (aucune API gratuite fiable ne l'expose),
+        mais un large échantillon représentatif. Chaque scan relance 1 requête Yahoo par valeur non encore en cache récent (&lt; 24 h).
+      </p>
+    </section>
+
+    <!-- ======================= ONGLET 6 : ALLOCATION ======================= -->
+    <section class="panel" id="panel-allocation" role="tabpanel" aria-labelledby="tab-allocation" hidden>
+      <div class="panel-head">
+        <h1>Allocation d'un budget <span class="muted">/ répartition automatique sur vos meilleures opportunités analysées</span></h1>
+      </div>
+
+      <div class="scenario-layout">
+        <div class="slider-card">
+          <form id="form-allocation" class="buysim-form">
+            <label for="allocation-amount">Montant à investir</label>
+            <input type="number" id="allocation-amount" min="1" step="any" placeholder="Ex. 100" value="100">
+            <button type="submit" class="btn btn-accent">Répartir</button>
+          </form>
+          <p class="hint">Répartition sur vos 5 meilleures opportunités « Achat » (watchlist + scan marché confondus), pondérée par leur score technique.</p>
+        </div>
+
+        <div class="scenario-result" id="allocation-result">
+          <p class="analysis-empty">Entrez un montant et cliquez sur « Répartir » pour voir une proposition d'allocation.</p>
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- Bandeau disclaimer permanent -->
+  <footer class="disclaimer" role="contentinfo">
+    ⚠ Analyse basée sur des indicateurs techniques automatisés, ne constitue pas un conseil en investissement réglementé.
+  </footer>
+
+  <!-- ======================= MODALE CLÉ API ======================= -->
+  <dialog id="settings-dialog" class="settings-dialog" aria-labelledby="settings-title">
+    <form method="dialog" id="form-settings">
+      <h2 id="settings-title">Source de données</h2>
+
+      <fieldset class="source-fieldset">
+        <legend class="sr-only">Choix de la source de données</legend>
+        <label class="source-option">
+          <input type="radio" name="source" value="yahoo" checked>
+          <span><strong>Yahoo Finance</strong> — gratuit, sans clé, sans quota.<br>
+          <span class="hint">Nécessite de lancer l'app avec <code>python3 server.py</code> (relais local).</span></span>
+        </label>
+        <label class="source-option">
+          <input type="radio" name="source" value="alphavantage">
+          <span><strong>Alpha Vantage</strong> — clé gratuite, 25 requêtes/jour.<br>
+          <span class="hint">Fonctionne aussi en double-clic (sans serveur).</span></span>
+        </label>
+      </fieldset>
+
+      <p class="hint">
+        Clé Alpha Vantage (uniquement si cette source est choisie) :
+        <a href="https://www.alphavantage.co/support/#api-key" target="_blank" rel="noopener">alphavantage.co/support/#api-key</a>.
+        Stockée uniquement dans votre navigateur (localStorage).
+      </p>
+      <label for="api-key-input">Clé Alpha Vantage (optionnelle en mode Yahoo)</label>
+      <input type="text" id="api-key-input" placeholder="Ex. A1B2C3D4E5F6G7H8" autocomplete="off" spellcheck="false">
+      <div class="dialog-actions">
+        <button type="submit" class="btn btn-accent" value="save">Enregistrer</button>
+        <button type="button" class="btn btn-ghost" id="btn-settings-close">Fermer</button>
+      </div>
+    </form>
+  </dialog>
+
+  <script>
+/* ============================================================================
+   TERMINAL — Mini-terminal boursier personnel (Alpha Vantage, 100 % front-end)
+   ----------------------------------------------------------------------------
+   Contrainte clé : UNE SEULE requête API par ticker (TIME_SERIES_DAILY,
+   outputsize=full). Tous les indicateurs (prix, variation, RSI 14 Wilder,
+   SMA 50/200, range 52 semaines, score) sont calculés localement en JS.
+   Quota : 25 requêtes/jour, compteur en localStorage, reset à minuit UTC.
+   ============================================================================ */
+
+"use strict";
+
+/* ============================= CONSTANTES ============================= */
+
+const QUOTA_MAX = 25;          // Quota quotidien du plan gratuit Alpha Vantage
+const HISTORY_KEEP = 420;      // Jours de bourse conservés en cache (> 252 + 200 marge)
+const FETCH_TIMEOUT_MS = 20000;
+
+// Clés localStorage (préfixées pour éviter les collisions)
+const LS = {
+  source:       "term_source",   // "yahoo" (défaut, gratuit illimité) ou "alphavantage"
+  key:          "term_apikey",
+  watchlist:    "term_watchlist",
+  cache:        "term_cache",
+  positions:    "term_positions",
+  quota:        "term_quota",
+  autopickLast: "term_autopick_last",
+  marketScanLast: "term_market_scan_last",
+};
+
+/* ============================= ÉTAT GLOBAL ============================= */
+
+let watchlist  = lsGet(LS.watchlist, []);   // ["AAPL", "MC.PA", ...]
+let cache      = lsGet(LS.cache, {});       // { TICKER: {updated, hist, ind} }
+let positions  = lsGet(LS.positions, []);   // [{id, ticker, qty, pru}]
+
+// Migration : les entrées mises en cache avant l'ajout du MACD / de la volatilité /
+// des performances multi-horizons n'ont pas ces champs sur `ind`. On les recalcule
+// depuis l'historique déjà stocké (aucun nouvel appel réseau) pour éviter un plantage
+// au rendu (ex. onglet Marché/Analyse lisant ind.perf sur une entrée obsolète).
+for (const ticker of Object.keys(cache)) {
+  const entry = cache[ticker];
+  if (entry && entry.hist && (!entry.ind || !entry.ind.perf)) {
+    const ind = computeIndicators(entry.hist);
+    const score = computeScore(ind);
+    cache[ticker] = { ...entry, ind, score, signal: signalFromScore(score) };
+  }
+}
+lsSet(LS.cache, cache);
+
+let editingPositionId = null;               // id de la position en cours d'édition
+let allocationChart = null;                 // instance Chart.js
+let lastBuysimResult = null;                // dernier résultat simulé (simulateur d'achat), pour "Appliquer"
+let lastAllocationPlan = null;               // dernière répartition proposée (onglet Allocation), pour "Appliquer"
+
+// Identifiants uniques pour les positions, même en cas de créations multiples
+// dans la même milliseconde (ex. application d'une répartition sur plusieurs lignes).
+let nextPositionId = Date.now();
+function newPositionId() { return nextPositionId++; }
+
+// Applique un achat (nouvelle ligne ou complément) à `positions`, avec PRU recalculé
+// en moyenne pondérée si la position existe déjà. N'écrit pas seul dans localStorage :
+// l'appelant doit ensuite lsSet(LS.positions, positions) + renderAll().
+function applyPurchase(ticker, price, amount) {
+  const qtyBought = amount / price;
+  const existing = positions.find(p => p.ticker === ticker);
+  if (existing) {
+    const newQty = existing.qty + qtyBought;
+    existing.pru = (existing.qty * existing.pru + amount) / newQty;
+    existing.qty = newQty;
+  } else {
+    positions.push({ id: newPositionId(), ticker, qty: qtyBought, pru: price });
+  }
+}
+
+/* ============================= HELPERS localStorage ============================= */
+
+function lsGet(key, fallback) {
+  try {
+    const raw = localStorage.getItem(key);
+    return raw === null ? fallback : JSON.parse(raw);
+  } catch {
+    return fallback;
+  }
+}
+
+function lsSet(key, value) {
+  try {
+    localStorage.setItem(key, JSON.stringify(value));
+  } catch (e) {
+    toast("Impossible d'écrire dans localStorage (stockage plein ?).", "error");
+  }
+}
+
+/* ============================= QUOTA API ============================= */
+
+// Date du jour au format YYYY-MM-DD, en UTC (le quota Alpha Vantage
+// est journalier ; on le remet à zéro à minuit UTC).
+function todayUTC() {
+  return new Date().toISOString().slice(0, 10);
+}
+
+// Récupère le quota du jour, en le réinitialisant si la date UTC a changé.
+function getQuota() {
+  let q = lsGet(LS.quota, null);
+  if (!q || q.date !== todayUTC()) {
+    q = { date: todayUTC(), used: 0 };
+    lsSet(LS.quota, q);
+  }
+  return q;
+}
+
+function quotaLeft() {
+  return Math.max(0, QUOTA_MAX - getQuota().used);
+}
+
+// Consomme 1 requête du quota local.
+function consumeQuota() {
+  const q = getQuota();
+  q.used = Math.min(QUOTA_MAX, q.used + 1);
+  lsSet(LS.quota, q);
+  renderQuota();
+}
+
+// Alpha Vantage nous signale que SON quota est épuisé → on aligne le compteur.
+function exhaustQuota() {
+  const q = getQuota();
+  q.used = QUOTA_MAX;
+  lsSet(LS.quota, q);
+  renderQuota();
+}
+
+function renderQuota() {
+  const el = document.getElementById("quota-value");
+  const suffix = document.querySelector(".quota-suffix");
+  if (getSource() === "yahoo") {
+    // Yahoo Finance : pas de quota journalier
+    el.textContent = "∞";
+    el.classList.remove("low", "zero");
+    suffix.textContent = "Yahoo — illimité";
+    return;
+  }
+  const left = quotaLeft();
+  el.textContent = `${left}/${QUOTA_MAX}`;
+  el.classList.toggle("low",  left > 0 && left <= 5);
+  el.classList.toggle("zero", left === 0);
+  suffix.textContent = "req. restantes";
+}
+
+/* ============================= SOURCE DE DONNÉES ============================= */
+
+function getSource() {
+  return lsGet(LS.source, "yahoo"); // Yahoo par défaut : gratuit, sans clé
+}
+
+/* ============================= APPEL API ALPHA VANTAGE ============================= */
+
+/**
+ * Récupère l'historique quotidien complet d'un ticker (TIME_SERIES_DAILY,
+ * outputsize=full). C'est la SEULE requête réseau de toute l'application.
+ * Retourne { dates: [...], closes: [...] } trié du plus récent au plus ancien,
+ * tronqué à HISTORY_KEEP jours de bourse.
+ * Lève une erreur typée { type, message } en cas de problème.
+ */
+/**
+ * Point d'entrée unique : choisit la source selon le réglage.
+ *  - "yahoo"        → /api/history via server.py (gratuit, sans clé, sans quota)
+ *  - "alphavantage" → API Alpha Vantage (clé requise, 25 req./jour)
+ */
+async function fetchDailySeries(ticker) {
+  return getSource() === "yahoo"
+    ? fetchDailySeriesYahoo(ticker)
+    : fetchDailySeriesAlphaVantage(ticker);
+}
+
+/**
+ * Source Yahoo Finance, via le relais local /api/history exposé par server.py.
+ * Nécessite que l'app soit lancée avec « python3 server.py » (et non en
+ * double-clic file://), sinon le relais n'existe pas → message clair.
+ */
+async function fetchDailySeriesYahoo(ticker) {
+  if (location.protocol === "file:") {
+    throw {
+      type: "noserver",
+      message: "La source Yahoo (gratuite) nécessite le serveur local : lancez « python3 server.py » puis ouvrez http://localhost:8750. Sinon, basculez sur Alpha Vantage dans « ⚙ Source & clé API ».",
+    };
+  }
+
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), FETCH_TIMEOUT_MS);
+
+  let resp;
+  try {
+    resp = await fetch("/api/history?symbol=" + encodeURIComponent(ticker), { signal: ctrl.signal });
+  } catch (e) {
+    clearTimeout(timer);
+    if (e.name === "AbortError") {
+      throw { type: "timeout", message: `Délai dépassé (${FETCH_TIMEOUT_MS / 1000}s) pour ${ticker}. Réessayez.` };
+    }
+    throw { type: "network", message: "Le serveur local ne répond pas. Vérifiez que « python3 server.py » tourne toujours." };
+  }
+  clearTimeout(timer);
+
+  let data;
+  try {
+    data = await resp.json();
+  } catch {
+    throw { type: "noserver", message: "Réponse inattendue : l'app ne semble pas servie par server.py. Lancez « python3 server.py » et ouvrez http://localhost:8750." };
+  }
+
+  // server.py renvoie {error, message} en cas de problème (ticker inconnu, réseau…)
+  if (data.error) {
+    throw { type: data.error, message: data.message || `Erreur ${data.error} pour ${ticker}.` };
+  }
+  if (!Array.isArray(data.closes) || data.closes.length < 2) {
+    throw { type: "format", message: `Historique invalide pour ${ticker}.` };
+  }
+  return { dates: data.dates, closes: data.closes, currency: data.currency || null };
+}
+
+async function fetchDailySeriesAlphaVantage(ticker) {
+  const apiKey = lsGet(LS.key, "");
+  if (!apiKey) {
+    throw { type: "nokey", message: "Aucune clé Alpha Vantage enregistrée. Ajoutez-la via « ⚙ Source & clé API », ou basculez sur la source Yahoo (gratuite, sans clé)." };
+  }
+  if (quotaLeft() <= 0) {
+    throw { type: "quota", message: "Quota local épuisé (25/25 aujourd'hui). Les données en cache restent affichées ; réessayez après minuit UTC." };
+  }
+
+  const url = "https://www.alphavantage.co/query"
+    + "?function=TIME_SERIES_DAILY"
+    + "&symbol=" + encodeURIComponent(ticker)
+    + "&outputsize=full"
+    + "&apikey=" + encodeURIComponent(apiKey);
+
+  // Timeout réseau via AbortController
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), FETCH_TIMEOUT_MS);
+
+  let resp;
+  try {
+    resp = await fetch(url, { signal: ctrl.signal });
+  } catch (e) {
+    clearTimeout(timer);
+    if (e.name === "AbortError") {
+      throw { type: "timeout", message: `Délai dépassé (${FETCH_TIMEOUT_MS / 1000}s) pour ${ticker}. Vérifiez votre connexion et réessayez.` };
+    }
+    throw { type: "network", message: `Erreur réseau pour ${ticker}. Êtes-vous connecté à Internet ?` };
+  }
+  clearTimeout(timer);
+
+  // La requête a atteint Alpha Vantage : on décompte 1 du quota local,
+  // quelle que soit la réponse (AV la compte aussi de son côté).
+  consumeQuota();
+
+  if (!resp.ok) {
+    throw { type: "http", message: `Réponse HTTP ${resp.status} d'Alpha Vantage pour ${ticker}.` };
+  }
+
+  let data;
+  try {
+    data = await resp.json();
+  } catch {
+    throw { type: "format", message: `Réponse illisible d'Alpha Vantage pour ${ticker}.` };
+  }
+
+  // --- Gestion des messages d'erreur "métier" d'Alpha Vantage ---
+
+  // Ticker inconnu OU clé invalide → champ "Error Message"
+  if (data["Error Message"]) {
+    const msg = String(data["Error Message"]).toLowerCase();
+    if (msg.includes("apikey") || msg.includes("api key")) {
+      throw { type: "badkey", message: "Clé API invalide ou manquante côté Alpha Vantage. Vérifiez-la dans « ⚙ Clé API »." };
+    }
+    throw { type: "symbol", message: `Ticker « ${ticker} » inconnu d'Alpha Vantage. Pour l'Europe, essayez un suffixe : MC.PA (Paris), SAP.DEX (Xetra), SHEL.LON (Londres).` };
+  }
+
+  // Quota Alpha Vantage dépassé → champs "Note" ou "Information"
+  if (data["Note"] || data["Information"]) {
+    exhaustQuota();
+    throw { type: "avlimit", message: "Alpha Vantage signale que le quota gratuit est atteint. Les derniers cours en cache restent affichés. Réessayez après minuit UTC." };
+  }
+
+  const series = data["Time Series (Daily)"];
+  if (!series) {
+    throw { type: "format", message: `Format de réponse inattendu pour ${ticker}.` };
+  }
+
+  // Tri des dates du plus récent au plus ancien, puis troncature.
+  const dates = Object.keys(series).sort().reverse().slice(0, HISTORY_KEEP);
+  const closes = dates.map(d => parseFloat(series[d]["4. close"]));
+
+  if (closes.length < 2 || closes.some(v => !isFinite(v))) {
+    throw { type: "format", message: `Historique invalide ou trop court pour ${ticker}.` };
+  }
+
+  return { dates, closes };
+}
+
+/* ============================= INDICATEURS (calcul local) ============================= */
+
+/**
+ * Calcule tous les indicateurs à partir de l'historique de clôtures
+ * (closes[0] = jour le plus récent). Zéro appel réseau.
+ */
+function computeIndicators(hist) {
+  const c = hist.closes;
+  const price = c[0];
+  const prevClose = c[1];
+  const changePct = prevClose ? ((price - prevClose) / prevClose) * 100 : 0;
+
+  // --- RSI 14 jours, méthode de Wilder (lissage exponentiel 1/14) ---
+  // On travaille en ordre chronologique (ancien → récent).
+  let rsi = null;
+  const chrono = [...c].reverse();
+  if (chrono.length >= 15) {
+    let gains = 0, losses = 0;
+    // Moyennes simples sur les 14 premières variations
+    for (let i = 1; i <= 14; i++) {
+      const d = chrono[i] - chrono[i - 1];
+      if (d > 0) gains += d; else losses -= d;
+    }
+    let avgGain = gains / 14;
+    let avgLoss = losses / 14;
+    // Lissage de Wilder sur le reste de l'historique
+    for (let i = 15; i < chrono.length; i++) {
+      const d = chrono[i] - chrono[i - 1];
+      avgGain = (avgGain * 13 + Math.max(d, 0)) / 14;
+      avgLoss = (avgLoss * 13 + Math.max(-d, 0)) / 14;
+    }
+    rsi = avgLoss === 0 ? 100 : 100 - 100 / (1 + avgGain / avgLoss);
+  }
+
+  // --- Moyennes mobiles simples ---
+  const sma = n => c.length >= n ? c.slice(0, n).reduce((a, b) => a + b, 0) / n : null;
+  const sma50 = sma(50);
+  const sma200 = sma(200);
+
+  // --- Range 52 semaines (~252 jours de bourse) ---
+  const yearSlice = c.slice(0, Math.min(252, c.length));
+  const high52 = Math.max(...yearSlice);
+  const low52  = Math.min(...yearSlice);
+  // Position du cours dans le range : 0 = au plus bas, 1 = au plus haut
+  const rangePos = high52 > low52 ? (price - low52) / (high52 - low52) : 0.5;
+
+  // --- MACD 12/26/9 (lissage exponentiel sur l'historique chronologique) ---
+  let macd = null;
+  if (chrono.length >= 35) {
+    const ema12 = ema(chrono, 12);
+    const ema26 = ema(chrono, 26);
+    const macdLine = ema12.map((v, i) => v - ema26[i]);
+    const signalLine = ema(macdLine, 9);
+    const line = macdLine[macdLine.length - 1];
+    const sig  = signalLine[signalLine.length - 1];
+    macd = { line, signal: sig, hist: line - sig, bullish: line > sig };
+  }
+
+  // --- Volatilité annualisée sur ~3 mois (écart-type des rendements log) ---
+  let vol = null;
+  const volWindow = chrono.slice(-63);
+  if (volWindow.length >= 21) {
+    const rets = [];
+    for (let i = 1; i < volWindow.length; i++) rets.push(Math.log(volWindow[i] / volWindow[i - 1]));
+    const mean = rets.reduce((a, b) => a + b, 0) / rets.length;
+    const variance = rets.reduce((a, b) => a + (b - mean) ** 2, 0) / rets.length;
+    vol = Math.sqrt(variance) * Math.sqrt(252) * 100;
+  }
+
+  // --- Performance sur plusieurs horizons (en jours de bourse) ---
+  const perfSince = n => c.length > n ? ((c[0] - c[n]) / c[n]) * 100 : null;
+  const perf = { w1: perfSince(5), m1: perfSince(21), m3: perfSince(63), m6: perfSince(126), y1: perfSince(252) };
+
+  return { price, changePct, rsi, sma50, sma200, high52, low52, rangePos, macd, vol, perf };
+}
+
+// Moyenne mobile exponentielle (série chronologique ancien → récent).
+function ema(values, period) {
+  const k = 2 / (period + 1);
+  const out = [values[0]];
+  for (let i = 1; i < values.length; i++) out.push(values[i] * k + out[i - 1] * (1 - k));
+  return out;
+}
+
+/**
+ * Score d'opportunité 0–100 (plus haut = configuration technique
+ * potentiellement plus favorable à l'achat) :
+ *   - RSI (0–40 pts)  : survente (≤30) = 40 pts, surachat (≥70) = 0, linéaire entre.
+ *   - Croisement SMA (0–30 pts) : golden cross (SMA50 > SMA200) = 30, death cross = 0.
+ *   - Range 52 sem. (0–30 pts) : proche du plus bas = 30, proche du plus haut = 0.
+ * Composante neutre (moitié des points) si les données manquent.
+ */
+function computeScore(ind) {
+  let score = 0;
+
+  if (ind.rsi !== null) {
+    if (ind.rsi <= 30) score += 40;
+    else if (ind.rsi >= 70) score += 0;
+    else score += 40 * (70 - ind.rsi) / 40; // linéaire entre 30 et 70
+  } else {
+    score += 20;
+  }
+
+  if (ind.sma50 !== null && ind.sma200 !== null) {
+    score += ind.sma50 > ind.sma200 ? 30 : 0;
+  } else {
+    score += 15;
+  }
+
+  score += 30 * (1 - ind.rangePos);
+
+  return Math.round(Math.min(100, Math.max(0, score)));
+}
+
+function signalFromScore(score) {
+  if (score >= 65) return "Achat";
+  if (score <= 35) return "Vente";
+  return "Neutre";
+}
+
+/* ============================= ANALYSE D'UN TICKER ============================= */
+
+/**
+ * Chaîne complète pour un ticker : requête API → indicateurs → score →
+ * mise en cache. Toute erreur est affichée en toast, jamais de crash silencieux.
+ */
+async function analyzeTicker(ticker, button, opts = {}) {
+  const { silent = false } = opts;
+  if (button) { button.disabled = true; button.textContent = "…"; }
+  try {
+    const hist = await fetchDailySeries(ticker);
+    const ind = computeIndicators(hist);
+    const score = computeScore(ind);
+    cache[ticker] = {
+      updated: new Date().toISOString(),
+      hist,                 // historique tronqué → cache réutilisable hors quota
+      ind,
+      score,
+      signal: signalFromScore(score),
+    };
+    lsSet(LS.cache, cache);
+    if (!silent) toast(`${ticker} analysé — score ${score}/100 (${cache[ticker].signal}).`, "success");
+  } catch (err) {
+    if (!silent) toast(err.message || `Erreur inconnue sur ${ticker}.`, err.type === "avlimit" || err.type === "quota" ? "warn" : "error");
+  } finally {
+    renderAll();
+  }
+}
+
+/* ============================= FORMATAGE ============================= */
+
+const fmtNum = new Intl.NumberFormat("fr-FR", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+function fnum(v) { return v === null || v === undefined || !isFinite(v) ? "—" : fmtNum.format(v); }
+function fpct(v) { return v === null || v === undefined || !isFinite(v) ? "—" : (v > 0 ? "+" : "") + fmtNum.format(v) + " %"; }
+function pctClass(v) { return v > 0 ? "up" : v < 0 ? "down" : ""; }
+
+function fdate(iso) {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  return d.toLocaleDateString("fr-FR", { day: "2-digit", month: "2-digit" })
+    + " " + d.toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" });
+}
+
+// Le cache est considéré "ancien" au-delà de 24 h.
+function isStale(entry) {
+  return entry && (Date.now() - new Date(entry.updated).getTime()) > 24 * 3600 * 1000;
+}
+
+function esc(s) {
+  const div = document.createElement("div");
+  div.textContent = String(s);
+  return div.innerHTML;
+}
+
+/* ============================= TOASTS ============================= */
+
+function toast(message, kind = "info") {
+  const zone = document.getElementById("toast-zone");
+  const el = document.createElement("div");
+  el.className = "toast" + (kind !== "info" ? ` toast-${kind}` : "");
+  el.textContent = message;
+  zone.appendChild(el);
+  setTimeout(() => el.remove(), 7000);
+}
+
+/* ============================= AUTOCOMPLETE RECHERCHE D'ENTREPRISE ============================= */
+
+const SEARCH_DEBOUNCE_MS = 250;
+const SEARCH_MIN_CHARS = 2;
+
+/**
+ * Branche une recherche par nom d'entreprise sur un champ texte : à la frappe,
+ * affiche des suggestions (ticker + nom + place boursière) via /api/search
+ * (relais Yahoo Finance dans server.py). Nécessite l'app servie par
+ * « python3 server.py » (pas file://) ; sinon la saisie manuelle du ticker
+ * reste utilisable normalement, sans suggestions.
+ */
+function attachTickerAutocomplete(input, dropdown, onPick) {
+  let debounceTimer = null;
+  let abortCtrl = null;
+  let items = [];
+  let highlighted = -1;
+
+  function close() {
+    dropdown.classList.add("hidden");
+    dropdown.innerHTML = "";
+    input.setAttribute("aria-expanded", "false");
+    input.removeAttribute("aria-activedescendant");
+    items = [];
+    highlighted = -1;
+  }
+
+  function highlight(index) {
+    const opts = dropdown.querySelectorAll(".suggestion-item");
+    opts.forEach(o => o.classList.remove("highlighted"));
+    if (index >= 0 && index < opts.length) {
+      opts[index].classList.add("highlighted");
+      opts[index].scrollIntoView({ block: "nearest" });
+      input.setAttribute("aria-activedescendant", opts[index].id);
+    } else {
+      input.removeAttribute("aria-activedescendant");
+    }
+    highlighted = index;
+  }
+
+  function pick(item) {
+    close();
+    onPick(item);
+  }
+
+  function render(list, state) {
+    items = state === "ok" ? list : [];
+    highlighted = -1;
+    dropdown.innerHTML = "";
+
+    if (state === "loading") {
+      dropdown.innerHTML = `<li class="suggestion-loading">Recherche…</li>`;
+    } else if (state === "empty") {
+      dropdown.innerHTML = `<li class="suggestion-empty">Aucun résultat.</li>`;
+    } else {
+      list.forEach((item, i) => {
+        const li = document.createElement("li");
+        li.className = "suggestion-item";
+        li.id = `${dropdown.id}-opt-${i}`;
+        li.setAttribute("role", "option");
+        li.innerHTML = `
+          <span class="s-symbol">${esc(item.symbol)}</span>
+          <span class="s-name">${esc(item.name)}</span>
+          <span class="s-exchange">${esc(item.exchange)}</span>`;
+        // mousedown (pas click) pour agir avant le blur du champ
+        li.addEventListener("mousedown", e => { e.preventDefault(); pick(item); });
+        dropdown.appendChild(li);
+      });
+    }
+
+    dropdown.classList.remove("hidden");
+    input.setAttribute("aria-expanded", "true");
+  }
+
+  input.addEventListener("input", () => {
+    const q = input.value.trim();
+    clearTimeout(debounceTimer);
+    if (abortCtrl) abortCtrl.abort();
+
+    if (location.protocol === "file:" || q.length < SEARCH_MIN_CHARS) {
+      close();
+      return;
+    }
+
+    render([], "loading");
+
+    debounceTimer = setTimeout(async () => {
+      abortCtrl = new AbortController();
+      try {
+        const resp = await fetch("/api/search?q=" + encodeURIComponent(q), { signal: abortCtrl.signal });
+        const data = await resp.json();
+        if (data.error || !Array.isArray(data.results)) { close(); return; }
+        render(data.results, data.results.length ? "ok" : "empty");
+      } catch (e) {
+        if (e.name !== "AbortError") close();
+      }
+    }, SEARCH_DEBOUNCE_MS);
+  });
+
+  input.addEventListener("keydown", e => {
+    if (dropdown.classList.contains("hidden") || items.length === 0) return;
+    if (e.key === "ArrowDown") { e.preventDefault(); highlight(Math.min(highlighted + 1, items.length - 1)); }
+    else if (e.key === "ArrowUp") { e.preventDefault(); highlight(Math.max(highlighted - 1, 0)); }
+    else if (e.key === "Enter") { if (highlighted >= 0) { e.preventDefault(); pick(items[highlighted]); } }
+    else if (e.key === "Escape") { close(); }
+  });
+
+  // Léger délai pour laisser le mousedown de la suggestion s'exécuter avant le blur.
+  // On annule aussi la recherche en cours : sans ça, une réponse arrivant après le
+  // blur pourrait rouvrir le menu alors que le champ a déjà perdu le focus.
+  input.addEventListener("blur", () => {
+    clearTimeout(debounceTimer);
+    if (abortCtrl) abortCtrl.abort();
+    setTimeout(close, 150);
+  });
+}
+
+attachTickerAutocomplete(
+  document.getElementById("input-ticker"),
+  document.getElementById("ticker-suggestions"),
+  item => {
+    document.getElementById("input-ticker").value = item.symbol;
+    document.getElementById("form-add-ticker").requestSubmit();
+  }
+);
+
+attachTickerAutocomplete(
+  document.getElementById("pos-ticker"),
+  document.getElementById("pos-ticker-suggestions"),
+  item => {
+    document.getElementById("pos-ticker").value = item.symbol;
+    document.getElementById("pos-qty").focus();
+  }
+);
+
+/* ============================= ONGLET 1 : DASHBOARD ============================= */
+
+function renderWatchlist() {
+  const tbody = document.getElementById("watchlist-body");
+  tbody.innerHTML = "";
+
+  if (watchlist.length === 0) {
+    tbody.innerHTML = `<tr><td colspan="11" class="na">Watchlist vide — ajoutez un ticker ci-dessus (ex. AAPL, MSFT, MC.PA, TTE.PA).</td></tr>`;
+    return;
+  }
+
+  for (const ticker of watchlist) {
+    const entry = cache[ticker];
+    const tr = document.createElement("tr");
+
+    if (entry) {
+      const { ind, score, signal } = entry;
+      const stale = isStale(entry) ? `<span class="stale-badge" title="Données de plus de 24 h">cache</span>` : "";
+      tr.innerHTML = `
+        <td><span class="cell-ticker">${esc(ticker)}</span>${stale}</td>
+        <td class="num">${fnum(ind.price)}</td>
+        <td class="num ${pctClass(ind.changePct)}">${fpct(ind.changePct)}</td>
+        <td class="num ${ind.rsi !== null && ind.rsi <= 30 ? "up" : ind.rsi >= 70 ? "down" : ""}">${ind.rsi === null ? "—" : fmtNum.format(ind.rsi)}</td>
+        <td class="num">${fnum(ind.sma50)}</td>
+        <td class="num">${fnum(ind.sma200)}</td>
+        <td>
+          <div class="range52">
+            <span>${fnum(ind.low52)}</span>
+            <span class="range-bar"><span class="range-dot" style="left:${(ind.rangePos * 100).toFixed(1)}%"></span></span>
+            <span>${fnum(ind.high52)}</span>
+          </div>
+        </td>
+        <td class="num">
+          <span class="score-cell">
+            <span class="score-bar"><span class="score-fill" style="width:${score}%"></span></span>
+            <span>${score}</span>
+          </span>
+        </td>
+        <td><span class="signal signal-${signal.toLowerCase()}">${signal}</span></td>
+        <td class="na">${fdate(entry.updated)}</td>
+        <td class="actions-col"></td>`;
+    } else {
+      tr.innerHTML = `
+        <td><span class="cell-ticker">${esc(ticker)}</span></td>
+        <td class="num na">—</td><td class="num na">—</td><td class="num na">—</td>
+        <td class="num na">—</td><td class="num na">—</td><td class="na">—</td>
+        <td class="num na">—</td><td class="na">—</td><td class="na">jamais</td>
+        <td class="actions-col"></td>`;
+    }
+
+    // Boutons d'action (créés en JS pour attacher proprement les handlers)
+    const actions = tr.querySelector(".actions-col");
+
+    const btnAnalyze = document.createElement("button");
+    btnAnalyze.className = "btn btn-small btn-accent";
+    btnAnalyze.textContent = "Analyser";
+    btnAnalyze.title = getSource() === "yahoo"
+      ? "1 requête Yahoo Finance (gratuit, sans quota)"
+      : "Consomme 1 requête du quota Alpha Vantage (25/jour)";
+    btnAnalyze.addEventListener("click", () => analyzeTicker(ticker, btnAnalyze));
+    actions.appendChild(btnAnalyze);
+
+    const btnRemove = document.createElement("button");
+    btnRemove.className = "btn btn-small btn-ghost btn-danger";
+    btnRemove.textContent = "✕";
+    btnRemove.title = `Retirer ${ticker} de la watchlist`;
+    btnRemove.setAttribute("aria-label", `Retirer ${ticker} de la watchlist`);
+    btnRemove.addEventListener("click", () => {
+      watchlist = watchlist.filter(t => t !== ticker);
+      lsSet(LS.watchlist, watchlist);
+      renderAll();
+    });
+    actions.appendChild(btnRemove);
+
+    tbody.appendChild(tr);
+  }
+}
+
+// Ajoute un ticker à la watchlist (réutilisé par le formulaire et l'onglet Marché).
+// Pas de limite de taille : Yahoo Finance (source par défaut) est gratuit et illimité.
+function addTickerToWatchlist(ticker) {
+  if (!ticker || !/^[A-Z0-9.\-]{1,12}$/.test(ticker)) {
+    toast("Format de ticker invalide (lettres, chiffres, points et tirets uniquement).", "error");
+    return false;
+  }
+  if (watchlist.includes(ticker)) {
+    toast(`${ticker} est déjà dans la watchlist.`, "warn");
+    return false;
+  }
+  watchlist.push(ticker);
+  lsSet(LS.watchlist, watchlist);
+  renderAll();
+  return true;
+}
+
+document.getElementById("form-add-ticker").addEventListener("submit", e => {
+  e.preventDefault();
+  const input = document.getElementById("input-ticker");
+  const ticker = input.value.trim().toUpperCase();
+  if (!ticker) return;
+  if (addTickerToWatchlist(ticker)) input.value = "";
+});
+
+/* ============================= MEILLEURES OPPORTUNITÉS (SÉLECTION HORAIRE) ============================= */
+
+const AUTO_PICK_INTERVAL_MS = 3600_000; // 1 heure
+
+// Meilleurs tickers de la watchlist en cache dont le signal est "Achat", triés par score.
+// Pas de limite par défaut : autant d'opportunités que la watchlist en contient.
+function computeTopPicks(limit = Infinity) {
+  return watchlist
+    .map(t => ({ ticker: t, entry: cache[t] }))
+    .filter(x => x.entry && x.entry.signal === "Achat")
+    .sort((a, b) => b.entry.score - a.entry.score)
+    .slice(0, limit);
+}
+
+function renderAutopick() {
+  const meta = document.getElementById("autopick-meta");
+  const body = document.getElementById("autopick-body");
+  const lastRun = lsGet(LS.autopickLast, null);
+
+  if (getSource() !== "yahoo") {
+    meta.textContent = "Rafraîchissement auto disponible en mode Yahoo (⚙ Source & clé API)";
+  } else if (lastRun) {
+    const next = new Date(new Date(lastRun).getTime() + AUTO_PICK_INTERVAL_MS);
+    meta.textContent = `MàJ ${fdate(lastRun)} — prochaine vers ${next.toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" })}`;
+  } else {
+    meta.textContent = "Première analyse en cours…";
+  }
+
+  body.innerHTML = "";
+  if (watchlist.length === 0) {
+    body.innerHTML = `<p class="autopick-empty">Ajoutez des tickers à la watchlist pour activer la sélection automatique.</p>`;
+    return;
+  }
+
+  const picks = computeTopPicks();
+  if (picks.length === 0) {
+    body.innerHTML = `<p class="autopick-empty">Aucun signal d'achat clair (score ≥ 65) actuellement dans la watchlist.</p>`;
+    return;
+  }
+
+  picks.forEach((p, i) => {
+    const div = document.createElement("div");
+    div.className = "autopick-item";
+    div.innerHTML = `
+      <span class="ap-rank">#${i + 1}</span>
+      <span class="ap-ticker">${esc(p.ticker)}</span>
+      <span class="ap-score">${p.entry.score}/100</span>
+      <span class="signal signal-achat">Achat</span>
+      <span class="muted">${fnum(p.entry.ind.price)}</span>`;
+    body.appendChild(div);
+  });
+}
+
+// Réanalyse toute la watchlist (source Yahoo, illimitée) pour rafraîchir la sélection.
+// En mode Alpha Vantage, on ne consomme pas le quota automatiquement : la sélection
+// reste basée sur le cache existant, à rafraîchir manuellement.
+async function runAutoPick() {
+  if (getSource() !== "yahoo" || watchlist.length === 0) { renderAutopick(); return; }
+
+  for (const ticker of watchlist) {
+    await analyzeTicker(ticker, null, { silent: true });
+    await new Promise(r => setTimeout(r, 400)); // éviter de saturer Yahoo Finance
+  }
+  lsSet(LS.autopickLast, new Date().toISOString());
+
+  const picks = computeTopPicks();
+  toast(picks.length
+    ? `Sélection auto mise à jour : ${picks.map(p => p.ticker).join(", ")}.`
+    : "Sélection auto mise à jour : aucun signal d'achat clair actuellement.", "success");
+  renderAutopick();
+}
+
+// Affichage immédiat depuis le cache, puis rafraîchissement si la dernière analyse
+// auto date de plus d'une heure (ou n'a jamais eu lieu). Ensuite, un rafraîchissement
+// toutes les heures tant que l'onglet reste ouvert.
+renderAutopick();
+{
+  const lastAutoRun = lsGet(LS.autopickLast, null);
+  const autopickDue = !lastAutoRun || (Date.now() - new Date(lastAutoRun).getTime()) >= AUTO_PICK_INTERVAL_MS;
+  if (autopickDue) runAutoPick();
+}
+setInterval(runAutoPick, AUTO_PICK_INTERVAL_MS);
+
+/* ============================= BANDEAU DÉFILANT ============================= */
+
+function renderTape() {
+  const track = document.getElementById("tape-track");
+  const items = watchlist
+    .filter(t => cache[t])
+    .map(t => {
+      const ind = cache[t].ind;
+      const cls = ind.changePct > 0 ? "up" : ind.changePct < 0 ? "down" : "";
+      const arrow = ind.changePct > 0 ? "▲" : ind.changePct < 0 ? "▼" : "◆";
+      return `<span class="tape-item"><span class="t-sym">${esc(t)}</span><span class="t-px">${fnum(ind.price)}</span><span class="${cls}">${arrow} ${fpct(ind.changePct)}</span></span>`;
+    });
+
+  if (items.length === 0) {
+    track.innerHTML = `<span class="tape-empty">— Ajoutez des tickers à la watchlist puis lancez une analyse pour alimenter le bandeau —</span>`;
+    return;
+  }
+  // Contenu dupliqué pour un défilement continu sans "trou"
+  track.innerHTML = items.join("") + items.join("");
+}
+
+/* ============================= ONGLET 2 : POSITIONS ============================= */
+
+// Cours de référence d'une position : dernier cours en cache, sinon PRU.
+function refPrice(pos) {
+  const entry = cache[pos.ticker];
+  return entry ? entry.ind.price : pos.pru;
+}
+
+function renderPositions() {
+  const tbody = document.getElementById("positions-body");
+  tbody.innerHTML = "";
+
+  let totalValue = 0, totalCost = 0;
+
+  if (positions.length === 0) {
+    tbody.innerHTML = `<tr><td colspan="8" class="na">Aucune position — ajoutez-en une ci-dessus.</td></tr>`;
+  }
+
+  for (const pos of positions) {
+    const price = refPrice(pos);
+    const value = pos.qty * price;
+    const cost  = pos.qty * pos.pru;
+    const pnl   = value - cost;
+    const pnlPct = cost > 0 ? (pnl / cost) * 100 : 0;
+    totalValue += value;
+    totalCost  += cost;
+
+    const noCache = !cache[pos.ticker];
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td><span class="cell-ticker">${esc(pos.ticker)}</span>${noCache ? `<span class="stale-badge" title="Pas de cours en cache : PRU utilisé">PRU</span>` : ""}</td>
+      <td class="num">${fmtNum.format(pos.qty)}</td>
+      <td class="num">${fnum(pos.pru)}</td>
+      <td class="num">${fnum(price)}</td>
+      <td class="num">${fnum(value)}</td>
+      <td class="num ${pctClass(pnl)}">${fnum(pnl)}</td>
+      <td class="num ${pctClass(pnlPct)}">${fpct(pnlPct)}</td>
+      <td class="actions-col"></td>`;
+
+    const actions = tr.querySelector(".actions-col");
+
+    const btnEdit = document.createElement("button");
+    btnEdit.className = "btn btn-small btn-ghost";
+    btnEdit.textContent = "✎";
+    btnEdit.title = `Modifier la position ${pos.ticker}`;
+    btnEdit.setAttribute("aria-label", `Modifier la position ${pos.ticker}`);
+    btnEdit.addEventListener("click", () => startEditPosition(pos));
+    actions.appendChild(btnEdit);
+
+    const btnDel = document.createElement("button");
+    btnDel.className = "btn btn-small btn-ghost btn-danger";
+    btnDel.textContent = "✕";
+    btnDel.title = `Supprimer la position ${pos.ticker}`;
+    btnDel.setAttribute("aria-label", `Supprimer la position ${pos.ticker}`);
+    btnDel.addEventListener("click", () => {
+      positions = positions.filter(p => p.id !== pos.id);
+      lsSet(LS.positions, positions);
+      renderAll();
+    });
+    actions.appendChild(btnDel);
+
+    tbody.appendChild(tr);
+  }
+
+  // Ligne de total
+  const totalPnl = totalValue - totalCost;
+  const totalPnlPct = totalCost > 0 ? (totalPnl / totalCost) * 100 : 0;
+  document.getElementById("total-value").textContent = fnum(totalValue);
+  const elPnl = document.getElementById("total-pnl");
+  const elPct = document.getElementById("total-pnl-pct");
+  elPnl.textContent = fnum(totalPnl);
+  elPct.textContent = fpct(totalPnlPct);
+  elPnl.className = "num " + pctClass(totalPnl);
+  elPct.className = "num " + pctClass(totalPnl);
+
+  renderAllocationChart();
+}
+
+// Passage du formulaire en mode "édition"
+function startEditPosition(pos) {
+  editingPositionId = pos.id;
+  document.getElementById("pos-ticker").value = pos.ticker;
+  document.getElementById("pos-qty").value = pos.qty;
+  document.getElementById("pos-pru").value = pos.pru;
+  document.getElementById("btn-position-submit").textContent = "✓ Enregistrer";
+  document.getElementById("btn-position-cancel").classList.remove("hidden");
+  document.getElementById("pos-ticker").focus();
+}
+
+function resetPositionForm() {
+  editingPositionId = null;
+  document.getElementById("form-add-position").reset();
+  document.getElementById("btn-position-submit").textContent = "+ Ajouter";
+  document.getElementById("btn-position-cancel").classList.add("hidden");
+}
+
+document.getElementById("btn-position-cancel").addEventListener("click", resetPositionForm);
+
+document.getElementById("form-add-position").addEventListener("submit", e => {
+  e.preventDefault();
+  const ticker = document.getElementById("pos-ticker").value.trim().toUpperCase();
+  const qty = parseFloat(document.getElementById("pos-qty").value);
+  const pru = parseFloat(document.getElementById("pos-pru").value);
+
+  if (!/^[A-Z0-9.\-]{1,12}$/.test(ticker)) { toast("Ticker invalide.", "error"); return; }
+  if (!isFinite(qty) || qty <= 0)          { toast("Quantité invalide.", "error"); return; }
+  if (!isFinite(pru) || pru <= 0)          { toast("PRU invalide.", "error"); return; }
+
+  if (editingPositionId !== null) {
+    const pos = positions.find(p => p.id === editingPositionId);
+    if (pos) { pos.ticker = ticker; pos.qty = qty; pos.pru = pru; }
+  } else {
+    positions.push({ id: newPositionId(), ticker, qty, pru });
+  }
+  lsSet(LS.positions, positions);
+  resetPositionForm();
+  renderAll();
+});
+
+// Camembert de répartition (Chart.js)
+function renderAllocationChart() {
+  const canvas = document.getElementById("allocation-chart");
+  if (!canvas || typeof Chart === "undefined") return;
+
+  const labels = positions.map(p => p.ticker);
+  const values = positions.map(p => p.qty * refPrice(p));
+
+  // Palette dérivée du thème
+  const colors = ["#ffb000", "#2ecc71", "#4aa8ff", "#ff4d4d", "#b87f0a", "#9b59b6", "#1abc9c", "#e67e22"];
+
+  if (allocationChart) allocationChart.destroy();
+  if (positions.length === 0) return;
+
+  allocationChart = new Chart(canvas, {
+    type: "pie",
+    data: {
+      labels,
+      datasets: [{
+        data: values,
+        backgroundColor: labels.map((_, i) => colors[i % colors.length]),
+        borderColor: "#12161b",
+        borderWidth: 2,
+      }],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: {
+          position: "bottom",
+          labels: { color: "#d7dde3", font: { family: "'IBM Plex Mono', monospace", size: 11 } },
+        },
+        tooltip: {
+          callbacks: {
+            label: ctx => ` ${ctx.label} : ${fmtNum.format(ctx.parsed)} (${fmtNum.format(ctx.parsed / values.reduce((a, b) => a + b, 0) * 100)} %)`,
+          },
+        },
+      },
+    },
+  });
+}
+
+/* ============================= ONGLET 3 : SIMULATEUR D'ACHAT ============================= */
+
+attachTickerAutocomplete(
+  document.getElementById("buysim-ticker"),
+  document.getElementById("buysim-suggestions"),
+  item => { document.getElementById("buysim-ticker").value = item.symbol; }
+);
+
+document.getElementById("form-buysim").addEventListener("submit", async e => {
+  e.preventDefault();
+  const ticker = document.getElementById("buysim-ticker").value.trim().toUpperCase();
+  const amount = parseFloat(document.getElementById("buysim-amount").value);
+
+  if (!/^[A-Z0-9.\-]{1,12}$/.test(ticker)) { toast("Ticker invalide.", "error"); return; }
+  if (!isFinite(amount) || amount <= 0) { toast("Montant invalide.", "error"); return; }
+
+  let entry = cache[ticker];
+  if (!entry) {
+    toast(`${ticker} n'est pas encore en cache — analyse en cours…`, "info");
+    await analyzeTicker(ticker, null, { silent: true });
+    entry = cache[ticker];
+  }
+  if (!entry) { toast(`Impossible de récupérer un cours pour ${ticker}.`, "error"); return; }
+
+  renderBuysimResult(ticker, entry.ind.price, amount);
+});
+
+// Calcule et affiche l'impact d'un achat simulé : nouvelle quantité, nouveau PRU
+// (moyenne pondérée si la position existe déjà), poids dans le portefeuille, P&L.
+function renderBuysimResult(ticker, price, amount) {
+  const qtyBought = amount / price;
+  const existing = positions.find(p => p.ticker === ticker);
+
+  const oldQty = existing ? existing.qty : 0;
+  const oldPru = existing ? existing.pru : null;
+  const oldValue = oldQty * price;
+
+  const newQty = oldQty + qtyBought;
+  const newPru = existing ? (existing.qty * existing.pru + amount) / newQty : price;
+  const newValue = newQty * price;
+
+  const totalBefore = positions.reduce((s, p) => s + p.qty * refPrice(p), 0);
+  const totalAfter = totalBefore + amount;
+
+  const weightBefore = totalBefore > 0 ? (oldValue / totalBefore) * 100 : 0;
+  const weightAfter = totalAfter > 0 ? (newValue / totalAfter) * 100 : 0;
+
+  const pnlBefore = existing ? (price - oldPru) * oldQty : 0;
+  const pnlAfter = (price - newPru) * newQty;
+
+  lastBuysimResult = { ticker, price, amount };
+
+  const result = document.getElementById("buysim-result");
+  result.innerHTML = `
+    <h2>Impact simulé — ${esc(ticker)}</h2>
+    <dl class="impact-grid">
+      <div><dt>Prix utilisé</dt><dd>${fnum(price)}</dd></div>
+      <div><dt>Quantité achetée</dt><dd>${fmtNum.format(qtyBought)}</dd></div>
+      <div><dt>Nouveau PRU</dt><dd>${fnum(newPru)}${existing ? ` <span class="muted">(était ${fnum(oldPru)})</span>` : ""}</dd></div>
+      <div><dt>Poids portefeuille</dt><dd>${fmtNum.format(weightAfter)} % <span class="muted">(${existing ? fmtNum.format(weightBefore) : "0"} % avant)</span></dd></div>
+    </dl>
+    <div class="table-wrap">
+      <table class="data-table">
+        <thead><tr><th></th><th class="num">Avant</th><th class="num">Après</th></tr></thead>
+        <tbody>
+          <tr><td>Quantité</td><td class="num">${existing ? fmtNum.format(oldQty) : "—"}</td><td class="num">${fmtNum.format(newQty)}</td></tr>
+          <tr><td>Valeur de la ligne</td><td class="num">${existing ? fnum(oldValue) : "—"}</td><td class="num">${fnum(newValue)}</td></tr>
+          <tr><td>P&amp;L de la ligne</td><td class="num ${pctClass(pnlBefore)}">${existing ? fnum(pnlBefore) : "—"}</td><td class="num ${pctClass(pnlAfter)}">${fnum(pnlAfter)}</td></tr>
+          <tr><td>Valeur totale portefeuille</td><td class="num">${fnum(totalBefore)}</td><td class="num">${fnum(totalAfter)}</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="hint">${existing ? "Position existante : le PRU est recalculé en moyenne pondérée." : "Nouvelle ligne : elle n'existe pas encore dans vos positions."}</p>
+    <button type="button" class="btn btn-accent" id="btn-buysim-apply">✓ Appliquer cet achat à mes positions</button>`;
+  document.getElementById("btn-buysim-apply").addEventListener("click", applyBuysim);
+}
+
+// Transforme la simulation en position réelle (créée ou mise à jour).
+function applyBuysim() {
+  if (!lastBuysimResult) return;
+  const { ticker, price, amount } = lastBuysimResult;
+  applyPurchase(ticker, price, amount);
+  lsSet(LS.positions, positions);
+  renderAll();
+  toast(`Achat appliqué : ${ticker} mis à jour dans vos positions.`, "success");
+
+  lastBuysimResult = null;
+  document.getElementById("buysim-result").innerHTML =
+    `<p class="analysis-empty">Achat appliqué. Lancez une nouvelle simulation si besoin.</p>`;
+}
+
+/* ============================= ONGLET 4 : ANALYSE ============================= */
+
+// Génère un texte de synthèse en français à partir des indicateurs en cache.
+// Purement descriptif : ce n'est pas un conseil en investissement.
+function buildAnalysisText(ticker, entry) {
+  const { ind, score, signal } = entry;
+  const parts = [];
+
+  // Momentum / RSI
+  if (ind.rsi !== null) {
+    if (ind.rsi <= 30) {
+      parts.push(`Le RSI 14 jours ressort à ${fmtNum.format(ind.rsi)}, en zone de survente (< 30) : le titre a subi une pression vendeuse marquée sur les dernières séances.`);
+    } else if (ind.rsi >= 70) {
+      parts.push(`Le RSI 14 jours ressort à ${fmtNum.format(ind.rsi)}, en zone de surachat (> 70) : le momentum haussier récent est fort, avec un risque accru de consolidation.`);
+    } else {
+      parts.push(`Le RSI 14 jours ressort à ${fmtNum.format(ind.rsi)}, en zone neutre (30–70) : pas d'excès de momentum notable.`);
+    }
+  }
+
+  // Tendance / moyennes mobiles
+  if (ind.sma50 !== null && ind.sma200 !== null) {
+    if (ind.sma50 > ind.sma200) {
+      parts.push(`Configuration de golden cross : la SMA 50 (${fnum(ind.sma50)}) évolue au-dessus de la SMA 200 (${fnum(ind.sma200)}), ce qui caractérise une tendance de fond haussière.`);
+    } else {
+      parts.push(`Configuration de death cross : la SMA 50 (${fnum(ind.sma50)}) évolue sous la SMA 200 (${fnum(ind.sma200)}), ce qui caractérise une tendance de fond baissière.`);
+    }
+    parts.push(`Le cours actuel (${fnum(ind.price)}) se situe ${ind.price >= ind.sma50 ? "au-dessus" : "en dessous"} de sa SMA 50 et ${ind.price >= ind.sma200 ? "au-dessus" : "en dessous"} de sa SMA 200.`);
+  } else {
+    parts.push(`Historique insuffisant pour calculer les deux moyennes mobiles (50 et 200 jours).`);
+  }
+
+  // Momentum court terme / MACD
+  if (ind.macd) {
+    parts.push(ind.macd.bullish
+      ? `Le MACD (12/26/9) est positif par rapport à sa ligne de signal (écart ${fnum(ind.macd.hist)}) : la dynamique de court terme confirme le biais haussier.`
+      : `Le MACD (12/26/9) est négatif par rapport à sa ligne de signal (écart ${fnum(ind.macd.hist)}) : la dynamique de court terme penche plutôt à la baisse.`);
+  }
+
+  // Position dans le range 52 semaines
+  const posPct = Math.round(ind.rangePos * 100);
+  parts.push(`Sur 52 semaines, le titre évolue entre ${fnum(ind.low52)} et ${fnum(ind.high52)} ; le cours actuel se situe à ${posPct} % de ce range (${posPct <= 25 ? "proche du plus bas annuel" : posPct >= 75 ? "proche du plus haut annuel" : "en milieu de range"}).`);
+
+  // Performance multi-horizons
+  const perfVals = [ind.perf.w1, ind.perf.m1, ind.perf.m3, ind.perf.m6, ind.perf.y1].filter(v => v !== null);
+  if (perfVals.length) {
+    const positives = perfVals.filter(v => v > 0).length;
+    const trend = positives === perfVals.length ? "uniformément haussière sur toutes les périodes observées"
+      : positives === 0 ? "uniformément baissière sur toutes les périodes observées"
+      : "mixte selon l'horizon (détail ci-dessus)";
+    parts.push(`Tendance de performance : ${trend}.`);
+  }
+
+  // Volatilité
+  if (ind.vol !== null) {
+    const volLabel = ind.vol < 20 ? "faible" : ind.vol < 40 ? "modérée" : "élevée";
+    parts.push(`Volatilité annualisée (3 mois) : ${fmtNum.format(ind.vol)} % — niveau ${volLabel}.`
+      + (ind.vol >= 40 ? " Amplitude de mouvement importante : à calibrer dans la taille de position et la gestion du risque." : ""));
+  }
+
+  // Convergence des signaux
+  let bullishCount = 0, totalCount = 0;
+  if (ind.rsi !== null) { totalCount++; if (ind.rsi <= 50) bullishCount++; }
+  if (ind.sma50 !== null && ind.sma200 !== null) { totalCount++; if (ind.sma50 > ind.sma200) bullishCount++; }
+  if (ind.macd) { totalCount++; if (ind.macd.bullish) bullishCount++; }
+  totalCount++; if (ind.rangePos <= 0.5) bullishCount++;
+  parts.push(`Convergence des signaux : ${bullishCount}/${totalCount} orientés haussiers, ${totalCount - bullishCount}/${totalCount} orientés baissiers.`);
+
+  // Synthèse score
+  parts.push(`Score d'opportunité technique : ${score}/100 → signal « ${signal} ». Ce score agrège mécaniquement RSI, croisement SMA 50/200 et position dans le range 52 semaines.`);
+
+  return parts;
+}
+
+// Bloc de statistiques compact (volatilité, MACD, performances) affiché en tête de carte.
+function buildAnalysisStatsHtml(ind) {
+  const volLabel = ind.vol === null ? "—" : `${fmtNum.format(ind.vol)} %`;
+  const macdLabel = ind.macd ? (ind.macd.bullish ? "Haussier" : "Baissier") : "—";
+  const macdClass = ind.macd ? (ind.macd.bullish ? "up" : "down") : "";
+  const items = [
+    ["Volatilité (3M, ann.)", volLabel, ""],
+    ["MACD 12/26/9", macdLabel, macdClass],
+    ["Perf. 1 mois", fpct(ind.perf.m1), pctClass(ind.perf.m1)],
+    ["Perf. 3 mois", fpct(ind.perf.m3), pctClass(ind.perf.m3)],
+    ["Perf. 1 an", fpct(ind.perf.y1), pctClass(ind.perf.y1)],
+  ];
+  return `<dl class="impact-grid analysis-stats">`
+    + items.map(([k, v, cls]) => `<div><dt>${esc(k)}</dt><dd class="${cls}">${esc(v)}</dd></div>`).join("")
+    + `</dl>`;
+}
+
+// Courbes de prix par ticker dans l'onglet Analyse : fermées par défaut, ouvertes
+// à la demande (l'utilisateur choisit s'il veut la courbe ou non), avec un choix de
+// période. 100 % réutilisé depuis l'historique déjà en cache — zéro requête réseau.
+const CHART_PERIODS = [
+  { key: "1s", label: "1 SEM.", days: 5 },
+  { key: "1m", label: "1 MOIS", days: 21 },
+  { key: "3m", label: "3 MOIS", days: 63 },
+  { key: "6m", label: "6 MOIS", days: 126 },
+  { key: "1a", label: "1 AN", days: 252 },
+];
+let openCharts = {};             // { TICKER: { period: "1a" } } — présence = courbe affichée
+let analysisChartInstances = {}; // { TICKER: instance Chart.js } — pour destroy() avant re-création
+
+function fdateShort(iso) {
+  return new Date(iso).toLocaleDateString("fr-FR", { day: "2-digit", month: "2-digit" });
+}
+
+function destroyAnalysisChart(ticker) {
+  if (analysisChartInstances[ticker]) {
+    analysisChartInstances[ticker].destroy();
+    delete analysisChartInstances[ticker];
+  }
+}
+
+function renderAnalysisChart(ticker, entry) {
+  const state = openCharts[ticker];
+  const canvas = document.getElementById(`chart-canvas-${ticker}`);
+  if (!state || !canvas || typeof Chart === "undefined") return;
+
+  const period = CHART_PERIODS.find(p => p.key === state.period) || CHART_PERIODS[4];
+  const hist = entry.hist; // le plus récent en premier
+  const n = Math.min(period.days, hist.closes.length);
+  // Ordre chronologique (ancien → récent) pour l'axe des temps.
+  const labels = hist.dates.slice(0, n).reverse().map(fdateShort);
+  const closes = hist.closes.slice(0, n).reverse();
+
+  destroyAnalysisChart(ticker);
+  analysisChartInstances[ticker] = new Chart(canvas, {
+    type: "line",
+    data: {
+      labels,
+      datasets: [{
+        data: closes,
+        borderColor: "#ffb000",
+        backgroundColor: "rgba(255,176,0,0.08)",
+        borderWidth: 2,
+        pointRadius: 0,
+        tension: 0.15,
+        fill: true,
+      }],
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { display: false },
+        tooltip: { callbacks: { label: ctx => fnum(ctx.parsed.y) } },
+      },
+      scales: {
+        x: { ticks: { color: "#7b8794", maxTicksLimit: 6, font: { family: "'IBM Plex Mono', monospace", size: 10 } }, grid: { color: "#1a2028" } },
+        y: { ticks: { color: "#7b8794", font: { family: "'IBM Plex Mono', monospace", size: 10 } }, grid: { color: "#1a2028" } },
+      },
+    },
+  });
+}
+
+function renderAnalysis() {
+  const container = document.getElementById("analysis-container");
+  container.innerHTML = "";
+
+  const analyzable = watchlist.filter(t => cache[t]);
+  if (analyzable.length === 0) {
+    container.innerHTML = `<p class="analysis-empty">Aucune donnée en cache. Lancez au moins une analyse depuis l'onglet Dashboard (F1) pour générer les synthèses.</p>`;
+    return;
+  }
+
+  for (const ticker of analyzable) {
+    const entry = cache[ticker];
+    const card = document.createElement("article");
+    card.className = "analysis-card";
+    const paragraphs = buildAnalysisText(ticker, entry).map(p => `<p>${esc(p)}</p>`).join("");
+
+    const chartState = openCharts[ticker];
+    const chartHtml = chartState ? `
+      <div class="analysis-chart-wrap">
+        <div class="chart-periods" role="tablist">
+          ${CHART_PERIODS.map(p => `<button type="button" class="btn btn-small period-btn ${chartState.period === p.key ? "btn-accent" : "btn-ghost"}" data-ticker="${esc(ticker)}" data-period="${p.key}">${p.label}</button>`).join("")}
+        </div>
+        <div class="chart-holder analysis-chart-holder">
+          <canvas id="chart-canvas-${ticker}"></canvas>
+        </div>
+      </div>` : "";
+
+    card.innerHTML = `
+      <h3>${esc(ticker)} <span class="signal signal-${entry.signal.toLowerCase()}">${entry.signal}</span>
+        <button type="button" class="btn btn-small btn-ghost btn-chart-toggle" data-ticker="${esc(ticker)}">${chartState ? "▲ Masquer la courbe" : "📈 Afficher la courbe"}</button>
+      </h3>
+      ${buildAnalysisStatsHtml(entry.ind)}
+      ${chartHtml}
+      ${paragraphs}
+      <p class="meta">Données du ${fdate(entry.updated)}${isStale(entry) ? " — cache de plus de 24 h, pensez à relancer une analyse si le quota le permet" : ""}.</p>`;
+    container.appendChild(card);
+
+    if (chartState) renderAnalysisChart(ticker, entry);
+  }
+}
+
+// Un seul écouteur délégué : survit à chaque reconstruction du innerHTML par renderAnalysis().
+document.getElementById("analysis-container").addEventListener("click", e => {
+  const toggleBtn = e.target.closest(".btn-chart-toggle");
+  if (toggleBtn) {
+    const ticker = toggleBtn.dataset.ticker;
+    if (openCharts[ticker]) {
+      delete openCharts[ticker];
+      destroyAnalysisChart(ticker);
+    } else {
+      openCharts[ticker] = { period: "1a" };
+    }
+    renderAnalysis();
+    return;
+  }
+  const periodBtn = e.target.closest(".period-btn");
+  if (periodBtn && openCharts[periodBtn.dataset.ticker]) {
+    openCharts[periodBtn.dataset.ticker].period = periodBtn.dataset.period;
+    renderAnalysis();
+  }
+});
+
+document.getElementById("btn-refresh-analysis").addEventListener("click", renderAnalysis);
+
+/* ============================= ONGLET 5 : MARCHÉ ============================= */
+
+// Sélection curatée de grandes capitalisations mondiales, tous secteurs confondus.
+// Pas une liste exhaustive/vérifiée des 3000 premières mondiales (aucune API gratuite
+// fiable ne l'expose) : un large échantillon représentatif, pour donner une base de
+// scan raisonnable sans dépendre d'un fournisseur de données payant.
+const MARKET_UNIVERSE = [
+  // --- Technologie (US) ---
+  { symbol: "AAPL", name: "Apple" }, { symbol: "MSFT", name: "Microsoft" }, { symbol: "GOOGL", name: "Alphabet" },
+  { symbol: "AMZN", name: "Amazon" }, { symbol: "NVDA", name: "Nvidia" }, { symbol: "META", name: "Meta Platforms" },
+  { symbol: "TSLA", name: "Tesla" }, { symbol: "AVGO", name: "Broadcom" }, { symbol: "ORCL", name: "Oracle" },
+  { symbol: "CRM", name: "Salesforce" }, { symbol: "ADBE", name: "Adobe" }, { symbol: "CSCO", name: "Cisco" },
+  { symbol: "ACN", name: "Accenture" }, { symbol: "IBM", name: "IBM" }, { symbol: "INTC", name: "Intel" },
+  { symbol: "AMD", name: "AMD" }, { symbol: "QCOM", name: "Qualcomm" }, { symbol: "TXN", name: "Texas Instruments" },
+  { symbol: "INTU", name: "Intuit" }, { symbol: "NOW", name: "ServiceNow" }, { symbol: "UBER", name: "Uber" },
+  { symbol: "PYPL", name: "PayPal" }, { symbol: "SHOP", name: "Shopify" }, { symbol: "TSM", name: "TSMC" },
+  // --- Santé (US) ---
+  { symbol: "UNH", name: "UnitedHealth" }, { symbol: "JNJ", name: "Johnson & Johnson" }, { symbol: "LLY", name: "Eli Lilly" },
+  { symbol: "ABBV", name: "AbbVie" }, { symbol: "MRK", name: "Merck" }, { symbol: "PFE", name: "Pfizer" },
+  { symbol: "TMO", name: "Thermo Fisher" }, { symbol: "ABT", name: "Abbott" }, { symbol: "DHR", name: "Danaher" },
+  { symbol: "BMY", name: "Bristol-Myers Squibb" }, { symbol: "AMGN", name: "Amgen" }, { symbol: "GILD", name: "Gilead Sciences" },
+  { symbol: "CVS", name: "CVS Health" }, { symbol: "ISRG", name: "Intuitive Surgical" }, { symbol: "VRTX", name: "Vertex Pharmaceuticals" },
+  { symbol: "REGN", name: "Regeneron" },
+  // --- Financières (US) ---
+  { symbol: "BRK-B", name: "Berkshire Hathaway" }, { symbol: "JPM", name: "JPMorgan Chase" }, { symbol: "V", name: "Visa" },
+  { symbol: "MA", name: "Mastercard" }, { symbol: "BAC", name: "Bank of America" }, { symbol: "WFC", name: "Wells Fargo" },
+  { symbol: "GS", name: "Goldman Sachs" }, { symbol: "MS", name: "Morgan Stanley" }, { symbol: "C", name: "Citigroup" },
+  { symbol: "SCHW", name: "Charles Schwab" }, { symbol: "BLK", name: "BlackRock" }, { symbol: "AXP", name: "American Express" },
+  { symbol: "SPGI", name: "S&P Global" }, { symbol: "PGR", name: "Progressive" }, { symbol: "CB", name: "Chubb" },
+  // --- Consommation (US) ---
+  { symbol: "WMT", name: "Walmart" }, { symbol: "PG", name: "Procter & Gamble" }, { symbol: "COST", name: "Costco" },
+  { symbol: "HD", name: "Home Depot" }, { symbol: "MCD", name: "McDonald's" }, { symbol: "NKE", name: "Nike" },
+  { symbol: "SBUX", name: "Starbucks" }, { symbol: "TGT", name: "Target" }, { symbol: "LOW", name: "Lowe's" },
+  { symbol: "DIS", name: "Disney" }, { symbol: "KO", name: "Coca-Cola" }, { symbol: "PEP", name: "PepsiCo" },
+  { symbol: "PM", name: "Philip Morris" }, { symbol: "CL", name: "Colgate-Palmolive" }, { symbol: "EL", name: "Estée Lauder" },
+  { symbol: "MDLZ", name: "Mondelez" }, { symbol: "BKNG", name: "Booking Holdings" }, { symbol: "CMG", name: "Chipotle" },
+  // --- Industrie / Énergie (US) ---
+  { symbol: "XOM", name: "ExxonMobil" }, { symbol: "CVX", name: "Chevron" }, { symbol: "CAT", name: "Caterpillar" },
+  { symbol: "BA", name: "Boeing" }, { symbol: "GE", name: "General Electric" }, { symbol: "HON", name: "Honeywell" },
+  { symbol: "UNP", name: "Union Pacific" }, { symbol: "UPS", name: "UPS" }, { symbol: "RTX", name: "RTX" },
+  { symbol: "LMT", name: "Lockheed Martin" }, { symbol: "DE", name: "Deere" }, { symbol: "ETN", name: "Eaton" },
+  { symbol: "EMR", name: "Emerson Electric" }, { symbol: "COP", name: "ConocoPhillips" }, { symbol: "SLB", name: "Schlumberger" },
+  // --- Communication / Utilities (US) ---
+  { symbol: "VZ", name: "Verizon" }, { symbol: "T", name: "AT&T" }, { symbol: "TMUS", name: "T-Mobile US" },
+  { symbol: "CMCSA", name: "Comcast" }, { symbol: "NFLX", name: "Netflix" }, { symbol: "DUK", name: "Duke Energy" },
+  { symbol: "SO", name: "Southern Company" }, { symbol: "NEE", name: "NextEra Energy" },
+  // --- Europe ---
+  { symbol: "MC.PA", name: "LVMH" }, { symbol: "OR.PA", name: "L'Oréal" }, { symbol: "TTE.PA", name: "TotalEnergies" },
+  { symbol: "SAN.PA", name: "Sanofi" }, { symbol: "AI.PA", name: "Air Liquide" }, { symbol: "BNP.PA", name: "BNP Paribas" },
+  { symbol: "SAP.DE", name: "SAP" }, { symbol: "SIE.DE", name: "Siemens" }, { symbol: "ALV.DE", name: "Allianz" },
+  { symbol: "DTE.DE", name: "Deutsche Telekom" }, { symbol: "MBG.DE", name: "Mercedes-Benz" }, { symbol: "BMW.DE", name: "BMW" },
+  { symbol: "NESN.SW", name: "Nestlé" }, { symbol: "NOVN.SW", name: "Novartis" }, { symbol: "ROG.SW", name: "Roche" },
+  { symbol: "UBSG.SW", name: "UBS" }, { symbol: "ASML.AS", name: "ASML" }, { symbol: "SHEL.L", name: "Shell" },
+  { symbol: "AZN.L", name: "AstraZeneca" }, { symbol: "HSBA.L", name: "HSBC" }, { symbol: "ULVR.L", name: "Unilever" },
+  { symbol: "BP.L", name: "BP" }, { symbol: "GSK.L", name: "GSK" }, { symbol: "RIO.L", name: "Rio Tinto" },
+  { symbol: "DGE.L", name: "Diageo" },
+  // --- Asie ---
+  { symbol: "7203.T", name: "Toyota" }, { symbol: "6758.T", name: "Sony" }, { symbol: "9984.T", name: "SoftBank Group" },
+  { symbol: "005930.KS", name: "Samsung Electronics" }, { symbol: "0700.HK", name: "Tencent" }, { symbol: "9988.HK", name: "Alibaba" },
+];
+
+// Petit pool de concurrence : lance `worker` sur chaque item, au plus `concurrency`
+// en parallèle à la fois. Une erreur isolée sur un item n'interrompt pas les autres.
+async function runPool(items, worker, concurrency) {
+  let i = 0;
+  async function next() {
+    while (i < items.length) {
+      const idx = i++;
+      try { await worker(items[idx], idx); } catch { /* on continue malgré une erreur isolée */ }
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, next));
+}
+
+async function runMarketScan() {
+  if (getSource() !== "yahoo") {
+    toast("Le scan du marché nécessite la source Yahoo (gratuite, illimitée). Changez de source dans « ⚙ Source & clé API ».", "warn");
+    return;
+  }
+
+  const btn = document.getElementById("btn-market-scan");
+  const status = document.getElementById("market-status");
+  btn.disabled = true;
+  let done = 0;
+  const total = MARKET_UNIVERSE.length;
+  status.textContent = `Analyse en cours… 0/${total}`;
+
+  await runPool(MARKET_UNIVERSE, async ({ symbol }) => {
+    const entry = cache[symbol];
+    if (!entry || isStale(entry)) {
+      await analyzeTicker(symbol, null, { silent: true });
+    }
+    done++;
+    status.textContent = `Analyse en cours… ${done}/${total}`;
+    renderMarketResults(); // classement mis à jour au fur et à mesure
+  }, 5);
+
+  lsSet(LS.marketScanLast, new Date().toISOString());
+  btn.disabled = false;
+  renderMarketResults();
+  toast("Scan du marché terminé.", "success");
+}
+
+function renderMarketResults() {
+  const tbody = document.getElementById("market-body");
+  const status = document.getElementById("market-status");
+
+  if (getSource() !== "yahoo") {
+    status.textContent = "Le scan nécessite la source Yahoo (⚙ Source & clé API).";
+  } else {
+    const lastScan = lsGet(LS.marketScanLast, null);
+    status.textContent = lastScan ? `Dernier scan : ${fdate(lastScan)}` : "Aucun scan encore lancé.";
+  }
+
+  const ranked = MARKET_UNIVERSE
+    .map(m => ({ ...m, entry: cache[m.symbol] }))
+    .filter(m => m.entry)
+    .sort((a, b) => b.entry.score - a.entry.score)
+    .slice(0, 30);
+
+  tbody.innerHTML = "";
+  if (ranked.length === 0) {
+    tbody.innerHTML = `<tr><td colspan="8" class="na">Lancez un scan pour voir les meilleures opportunités du marché.</td></tr>`;
+    return;
+  }
+
+  ranked.forEach((m, i) => {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td class="na">#${i + 1}</td>
+      <td><span class="cell-ticker">${esc(m.symbol)}</span></td>
+      <td>${esc(m.name)}</td>
+      <td class="num">${fnum(m.entry.ind.price)}</td>
+      <td class="num">${m.entry.score}/100</td>
+      <td><span class="signal signal-${m.entry.signal.toLowerCase()}">${m.entry.signal}</span></td>
+      <td class="num ${pctClass(m.entry.ind.perf.y1)}">${fpct(m.entry.ind.perf.y1)}</td>
+      <td class="actions-col"></td>`;
+
+    const actions = tr.querySelector(".actions-col");
+    if (watchlist.includes(m.symbol)) {
+      actions.innerHTML = `<span class="muted">✓ suivi</span>`;
+    } else {
+      const btnAdd = document.createElement("button");
+      btnAdd.className = "btn btn-small btn-accent";
+      btnAdd.textContent = "+ Ajouter";
+      btnAdd.addEventListener("click", () => addTickerToWatchlist(m.symbol));
+      actions.appendChild(btnAdd);
+    }
+    tbody.appendChild(tr);
+  });
+}
+
+document.getElementById("btn-market-scan").addEventListener("click", runMarketScan);
+renderMarketResults(); // affichage initial depuis le cache existant (watchlist déjà analysée, etc.)
+
+/* ============================= ONGLET 6 : ALLOCATION ============================= */
+
+// Meilleures opportunités toutes sources confondues (watchlist + scan marché),
+// à la différence de computeTopPicks() qui ne regarde que la watchlist.
+function bestOpportunities(limit = 5) {
+  return Object.keys(cache)
+    .map(t => ({ ticker: t, entry: cache[t] }))
+    .filter(x => x.entry && x.entry.signal === "Achat")
+    .sort((a, b) => b.entry.score - a.entry.score)
+    .slice(0, limit);
+}
+
+document.getElementById("form-allocation").addEventListener("submit", e => {
+  e.preventDefault();
+  const amount = parseFloat(document.getElementById("allocation-amount").value);
+  if (!isFinite(amount) || amount <= 0) { toast("Montant invalide.", "error"); return; }
+  renderAllocationResult(amount);
+});
+
+// Calcule une répartition pondérée par score parmi les meilleures opportunités
+// « Achat » connues, et l'affiche avec un bouton pour l'appliquer aux positions.
+function renderAllocationResult(amount) {
+  const result = document.getElementById("allocation-result");
+  const picks = bestOpportunities(5);
+
+  if (picks.length === 0) {
+    result.innerHTML = `<p class="analysis-empty">Aucune opportunité « Achat » détectée pour l'instant. Analysez des tickers (Dashboard ou Marché) avant de répartir un budget.</p>`;
+    lastAllocationPlan = null;
+    return;
+  }
+
+  const totalScore = picks.reduce((s, p) => s + p.entry.score, 0);
+  const plan = picks.map(p => {
+    const weight = p.entry.score / totalScore;
+    const alloc = amount * weight;
+    const price = p.entry.ind.price;
+    return { ticker: p.ticker, score: p.entry.score, weight, alloc, price, qty: alloc / price };
+  });
+  lastAllocationPlan = plan;
+
+  const rows = plan.map(p => `
+    <tr>
+      <td><span class="cell-ticker">${esc(p.ticker)}</span></td>
+      <td class="num">${p.score}/100</td>
+      <td class="num">${fmtNum.format(p.weight * 100)} %</td>
+      <td class="num">${fnum(p.alloc)}</td>
+      <td class="num">${fnum(p.price)}</td>
+      <td class="num">${fmtNum.format(p.qty)}</td>
+    </tr>`).join("");
+
+  result.innerHTML = `
+    <h2>Répartition proposée — ${fnum(amount)}</h2>
+    <p class="hint">Pondération proportionnelle au score technique parmi vos ${picks.length} meilleure(s) opportunité(s) « Achat ».</p>
+    <div class="table-wrap">
+      <table class="data-table">
+        <thead><tr><th>Ticker</th><th class="num">Score</th><th class="num">Poids</th><th class="num">Montant</th><th class="num">Prix</th><th class="num">Quantité</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>
+    <button type="button" class="btn btn-accent" id="btn-allocation-apply">✓ Appliquer cette répartition à mes positions</button>`;
+  document.getElementById("btn-allocation-apply").addEventListener("click", applyAllocation);
+}
+
+function applyAllocation() {
+  if (!lastAllocationPlan) return;
+  for (const p of lastAllocationPlan) applyPurchase(p.ticker, p.price, p.alloc);
+  lsSet(LS.positions, positions);
+  renderAll();
+  toast(`Répartition appliquée sur ${lastAllocationPlan.length} ligne(s).`, "success");
+  lastAllocationPlan = null;
+  document.getElementById("allocation-result").innerHTML =
+    `<p class="analysis-empty">Répartition appliquée. Relancez une simulation si besoin.</p>`;
+}
+
+/* ============================= NAVIGATION PAR ONGLETS ============================= */
+
+document.querySelectorAll(".tab").forEach(btn => {
+  btn.addEventListener("click", () => {
+    document.querySelectorAll(".tab").forEach(b => {
+      b.classList.toggle("active", b === btn);
+      b.setAttribute("aria-selected", b === btn ? "true" : "false");
+    });
+    document.querySelectorAll(".panel").forEach(p => {
+      const active = p.id === "panel-" + btn.dataset.tab;
+      p.classList.toggle("active", active);
+      p.hidden = !active;
+    });
+    // Certains rendus dépendent de la visibilité (Chart.js notamment)
+    if (btn.dataset.tab === "positions") renderPositions();
+    if (btn.dataset.tab === "analyse") renderAnalysis();
+  });
+});
+
+// Raccourcis clavier F1–F4 façon terminal (sans bloquer si un champ est actif)
+document.addEventListener("keydown", e => {
+  const map = { F1: "dashboard", F2: "positions", F3: "buysim", F4: "analyse", F5: "marche", F6: "allocation" };
+  if (map[e.key]) {
+    e.preventDefault();
+    document.getElementById("tab-" + map[e.key]).click();
+  }
+});
+
+/* ============================= MODALE CLÉ API ============================= */
+
+const settingsDialog = document.getElementById("settings-dialog");
+
+document.getElementById("btn-settings").addEventListener("click", () => {
+  document.getElementById("api-key-input").value = lsGet(LS.key, "");
+  const src = getSource();
+  document.querySelector(`input[name="source"][value="${src}"]`).checked = true;
+  settingsDialog.showModal();
+});
+
+document.getElementById("btn-settings-close").addEventListener("click", () => settingsDialog.close());
+
+document.getElementById("form-settings").addEventListener("submit", () => {
+  const key = document.getElementById("api-key-input").value.trim();
+  const src = document.querySelector('input[name="source"]:checked').value;
+  lsSet(LS.key, key);
+  lsSet(LS.source, src);
+  toast(src === "yahoo"
+    ? "Source : Yahoo Finance (gratuit, sans quota). Lancez l'app via « python3 server.py »."
+    : "Source : Alpha Vantage (25 requêtes/jour)." + (key ? " Clé enregistrée." : " ⚠ Aucune clé enregistrée."),
+    "success");
+  renderAll();
+});
+
+/* ============================= RENDU GLOBAL ============================= */
+
+function renderAll() {
+  renderQuota();
+  renderAutopick();
+  renderWatchlist();
+  renderTape();
+  renderPositions();
+  renderAnalysis();
+  renderMarketResults();
+}
+
+/* ============================= INITIALISATION ============================= */
+
+renderAll();
+
+// Guidage au lancement selon la source et le mode d'ouverture.
+if (getSource() === "yahoo" && location.protocol === "file:") {
+  toast("Source Yahoo (gratuite) active, mais l'app est ouverte en double-clic : lancez « python3 server.py » puis ouvrez http://localhost:8750 pour analyser.", "warn");
+} else if (getSource() === "alphavantage" && !lsGet(LS.key, "")) {
+  toast("Mode Alpha Vantage sans clé enregistrée : ajoutez-la via « ⚙ Source & clé API », ou repassez sur Yahoo (gratuit).", "warn");
+}
+
+</script>
+</body>
+</html>

@@ -1,0 +1,181 @@
+#!/usr/bin/env python3
+# ============================================================================
+# TERMINAL — Serveur local
+# ----------------------------------------------------------------------------
+# Rôle double :
+#   1. Servir les fichiers statiques de l'app (index.html, app.js, style.css)
+#   2. Exposer /api/history?symbol=XXX : relais vers l'API gratuite de
+#      Yahoo Finance (endpoint v8/finance/chart, celui qui alimente leur site).
+#      → Pas de clé API, pas de quota journalier de 25 requêtes.
+#      Le relais est nécessaire car le navigateur ne peut pas appeler Yahoo
+#      directement (blocage CORS) et Yahoo exige un en-tête User-Agent.
+#
+# Lancement local :  python3 server.py    puis ouvrir http://localhost:8750
+# Hébergement cloud (Render, Railway...) : ces plateformes fournissent PORT via
+# une variable d'environnement, ce qui bascule automatiquement l'écoute sur
+# 0.0.0.0 (accessible depuis l'extérieur) au lieu de 127.0.0.1 (local uniquement).
+# ============================================================================
+
+import json
+import os
+import urllib.request
+import urllib.error
+import urllib.parse
+from functools import partial
+from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
+from urllib.parse import urlparse, parse_qs
+from datetime import datetime, timezone
+
+PORT = int(os.environ.get("PORT", 8750))
+HOST = "0.0.0.0" if "PORT" in os.environ else "127.0.0.1"
+APP_DIR = os.path.dirname(os.path.abspath(__file__))
+HISTORY_KEEP = 420  # jours de bourse renvoyés (aligné sur app.js)
+
+# range=2y suffit largement pour SMA 200 + range 52 semaines
+YAHOO_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{sym}?range=2y&interval=1d"
+# Recherche par nom d'entreprise → liste de tickers correspondants
+SEARCH_URL = "https://query1.finance.yahoo.com/v1/finance/search?q={q}&quotesCount=8&newsCount=0&listsCount=0"
+USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+
+
+class Handler(SimpleHTTPRequestHandler):
+    """Fichiers statiques + routes /api/history et /api/search."""
+
+    def do_GET(self):
+        parsed = urlparse(self.path)
+        if parsed.path == "/api/history":
+            self.handle_history(parse_qs(parsed.query))
+        elif parsed.path == "/api/search":
+            self.handle_search(parse_qs(parsed.query))
+        else:
+            super().do_GET()
+
+    # --- utilitaire : réponse JSON ---
+    def send_json(self, obj, status=200):
+        data = json.dumps(obj, ensure_ascii=False).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(data)
+
+    # --- route /api/history?symbol=XXX ---
+    def handle_history(self, qs):
+        sym = (qs.get("symbol") or [""])[0].strip().upper()
+        if not sym or len(sym) > 15:
+            return self.send_json(
+                {"error": "symbol", "message": "Ticker manquant ou invalide."}, 400)
+
+        url = YAHOO_URL.format(sym=urllib.parse.quote(sym))
+        req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+
+        try:
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                return self.send_json(
+                    {"error": "symbol",
+                     "message": f"Ticker « {sym} » inconnu de Yahoo Finance. "
+                                f"Pour l'Europe : MC.PA, TTE.PA (Paris), SAP.DE "
+                                f"(Francfort), SHEL.L (Londres), ASML.AS (Amsterdam)."},
+                    404)
+            if e.code == 429:
+                return self.send_json(
+                    {"error": "ratelimit",
+                     "message": "Yahoo Finance limite temporairement les requêtes. "
+                                "Attendez une minute puis réessayez."}, 502)
+            return self.send_json(
+                {"error": "http",
+                 "message": f"Yahoo Finance a répondu HTTP {e.code}."}, 502)
+        except Exception:
+            return self.send_json(
+                {"error": "network",
+                 "message": "Impossible de joindre Yahoo Finance. "
+                            "Vérifiez votre connexion Internet."}, 502)
+
+        # --- Normalisation : {dates:[...], closes:[...]} du plus récent au plus ancien
+        try:
+            result = data["chart"]["result"][0]
+            timestamps = result["timestamp"]
+            closes = result["indicators"]["quote"][0]["close"]
+
+            # On garde une seule clôture par date (la dernière), on écarte les nulls
+            by_date = {}
+            for ts, close in zip(timestamps, closes):
+                if close is None:
+                    continue
+                day = datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d")
+                by_date[day] = float(close)
+
+            pairs = sorted(by_date.items(), reverse=True)[:HISTORY_KEEP]
+            if len(pairs) < 2:
+                raise ValueError("historique trop court")
+
+            currency = (result.get("meta") or {}).get("currency")
+            return self.send_json({
+                "dates":   [p[0] for p in pairs],
+                "closes":  [p[1] for p in pairs],
+                "currency": currency,
+            })
+        except Exception:
+            return self.send_json(
+                {"error": "format",
+                 "message": f"Réponse Yahoo inattendue pour {sym}."}, 502)
+
+    # --- route /api/search?q=nom d'entreprise ---
+    def handle_search(self, qs):
+        q = (qs.get("q") or [""])[0].strip()
+        if not q or len(q) > 60:
+            return self.send_json({"error": "query", "message": "Recherche manquante ou trop longue."}, 400)
+
+        url = SEARCH_URL.format(q=urllib.parse.quote(q))
+        req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            if e.code == 429:
+                return self.send_json(
+                    {"error": "ratelimit",
+                     "message": "Yahoo Finance limite temporairement les requêtes de recherche."}, 502)
+            return self.send_json(
+                {"error": "http", "message": f"Yahoo Finance a répondu HTTP {e.code}."}, 502)
+        except Exception:
+            return self.send_json(
+                {"error": "network",
+                 "message": "Impossible de joindre Yahoo Finance."}, 502)
+
+        try:
+            quotes = data.get("quotes") or []
+            results = [
+                {
+                    "symbol": item["symbol"],
+                    "name": item.get("shortname") or item.get("longname") or item["symbol"],
+                    "exchange": item.get("exchange", ""),
+                    "type": item.get("quoteType", ""),
+                }
+                for item in quotes
+                if item.get("symbol") and item.get("quoteType") in ("EQUITY", "ETF")
+            ]
+            return self.send_json({"results": results})
+        except Exception:
+            return self.send_json(
+                {"error": "format", "message": "Réponse de recherche Yahoo inattendue."}, 502)
+
+    # Journal minimal (une ligne par requête API seulement)
+    def log_message(self, fmt, *args):
+        if "/api/" in (args[0] if args else ""):
+            print(self.address_string(), "-", args[0])
+
+
+if __name__ == "__main__":
+    print(f"┌─ TERMINAL boursier ─────────────────────────────┐")
+    print(f"│  Ouvrez :  http://{'localhost' if HOST == '127.0.0.1' else HOST}:{PORT}")
+    print(f"│  Source de données : Yahoo Finance (gratuit)    │")
+    print(f"│  Arrêt : Ctrl+C                                 │")
+    print(f"└─────────────────────────────────────────────────┘")
+    handler = partial(Handler, directory=APP_DIR)
+    ThreadingHTTPServer((HOST, PORT), handler).serve_forever()
