@@ -35,11 +35,21 @@ HISTORY_KEEP = 420  # jours de bourse renvoyés (aligné sur app.js)
 YAHOO_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{sym}?range=2y&interval=1d"
 # Recherche par nom d'entreprise → liste de tickers correspondants
 SEARCH_URL = "https://query1.finance.yahoo.com/v1/finance/search?q={q}&quotesCount=8&newsCount=0&listsCount=0"
+# Actualités récentes liées à un ticker (même endpoint de recherche, avec newsCount>0)
+NEWS_URL = "https://query1.finance.yahoo.com/v1/finance/search?q={sym}&quotesCount=0&newsCount=6"
+# Listes prédéfinies Yahoo ("screeners") : chacune couvre son propre balayage du marché
+# entier côté Yahoo (bien plus large que ce qu'on pourrait interroger titre par titre).
+SCREENER_URL = "https://query1.finance.yahoo.com/v1/finance/screener/predefined/saved?formatted=false&count={count}&scrIds={scr}"
+SCREENER_ALLOWED = {
+    "day_gainers", "day_losers", "most_actives", "undervalued_large_caps",
+    "growth_technology_stocks", "aggressive_small_caps", "small_cap_gainers",
+    "undervalued_growth_stocks", "most_shorted_stocks", "conservative_foreign_funds",
+}
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
 
 
 class Handler(SimpleHTTPRequestHandler):
-    """Fichiers statiques + routes /api/history et /api/search."""
+    """Fichiers statiques + routes /api/history, /api/search, /api/news, /api/screener."""
 
     def do_GET(self):
         parsed = urlparse(self.path)
@@ -47,6 +57,10 @@ class Handler(SimpleHTTPRequestHandler):
             self.handle_history(parse_qs(parsed.query))
         elif parsed.path == "/api/search":
             self.handle_search(parse_qs(parsed.query))
+        elif parsed.path == "/api/news":
+            self.handle_news(parse_qs(parsed.query))
+        elif parsed.path == "/api/screener":
+            self.handle_screener(parse_qs(parsed.query))
         else:
             super().do_GET()
 
@@ -164,6 +178,80 @@ class Handler(SimpleHTTPRequestHandler):
         except Exception:
             return self.send_json(
                 {"error": "format", "message": "Réponse de recherche Yahoo inattendue."}, 502)
+
+    # --- route /api/news?symbol=XXX : actualités récentes pour un ticker ---
+    def handle_news(self, qs):
+        sym = (qs.get("symbol") or [""])[0].strip().upper()
+        if not sym or len(sym) > 15:
+            return self.send_json({"error": "symbol", "message": "Ticker manquant ou invalide."}, 400)
+
+        url = NEWS_URL.format(sym=urllib.parse.quote(sym))
+        req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            if e.code == 429:
+                return self.send_json(
+                    {"error": "ratelimit", "message": "Yahoo Finance limite temporairement les requêtes."}, 502)
+            return self.send_json({"error": "http", "message": f"Yahoo Finance a répondu HTTP {e.code}."}, 502)
+        except Exception:
+            return self.send_json({"error": "network", "message": "Impossible de joindre Yahoo Finance."}, 502)
+
+        try:
+            items = data.get("news") or []
+            news = []
+            for n in items:
+                if not n.get("title") or not n.get("link"):
+                    continue
+                ts = n.get("providerPublishTime")
+                date = datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%d/%m/%Y") if ts else None
+                news.append({
+                    "title": n["title"],
+                    "link": n["link"],
+                    "publisher": n.get("publisher", ""),
+                    "date": date,
+                })
+            return self.send_json({"news": news})
+        except Exception:
+            return self.send_json({"error": "format", "message": "Réponse actualités Yahoo inattendue."}, 502)
+
+    # --- route /api/screener?scrId=XXX&count=N : listes prédéfinies Yahoo ---
+    def handle_screener(self, qs):
+        scr = (qs.get("scrId") or [""])[0].strip()
+        if scr not in SCREENER_ALLOWED:
+            return self.send_json(
+                {"error": "scrId", "message": "Catégorie de screener invalide ou non autorisée."}, 400)
+        try:
+            count = max(1, min(250, int((qs.get("count") or ["100"])[0])))
+        except ValueError:
+            count = 100
+
+        url = SCREENER_URL.format(count=count, scr=urllib.parse.quote(scr))
+        req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+
+        try:
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            if e.code == 429:
+                return self.send_json(
+                    {"error": "ratelimit", "message": "Yahoo Finance limite temporairement les requêtes."}, 502)
+            return self.send_json({"error": "http", "message": f"Yahoo Finance a répondu HTTP {e.code}."}, 502)
+        except Exception:
+            return self.send_json({"error": "network", "message": "Impossible de joindre Yahoo Finance."}, 502)
+
+        try:
+            result = (data.get("finance", {}).get("result") or [{}])[0]
+            quotes = result.get("quotes") or []
+            results = [
+                {"symbol": q["symbol"], "name": q.get("shortName") or q.get("longName") or q["symbol"]}
+                for q in quotes if q.get("symbol")
+            ]
+            return self.send_json({"results": results})
+        except Exception:
+            return self.send_json({"error": "format", "message": "Réponse de screener Yahoo inattendue."}, 502)
 
     # Journal minimal (une ligne par requête API seulement)
     def log_message(self, fmt, *args):

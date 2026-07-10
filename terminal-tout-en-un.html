@@ -316,6 +316,10 @@ input::placeholder { color: var(--text-dim); }
 
 /* Cellule ticker */
 .cell-ticker { font-family: var(--mono); font-weight: 700; color: var(--amber); }
+.cell-company { font-size: 11px; color: var(--text-dim); font-weight: 400; white-space: normal; }
+
+.watchlist-filter-row { margin-bottom: 10px; }
+#watchlist-filter { width: 100%; max-width: 360px; }
 .stale-badge {
   font-size: 10px; color: var(--text-dim);
   border: 1px solid var(--border); border-radius: 3px;
@@ -457,6 +461,19 @@ input::placeholder { color: var(--text-dim); }
 .chart-periods { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 8px; }
 .analysis-chart-holder { height: 220px; }
 
+.analysis-news { margin: 4px 0 12px; }
+.news-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.news-list li {
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 8px 10px;
+  font-size: 13px;
+}
+.news-list a { color: var(--blue); text-decoration: none; }
+.news-list a:hover { text-decoration: underline; }
+.news-list .muted { display: block; margin-top: 2px; font-size: 11px; }
+
 /* ============================= DISCLAIMER ============================= */
 
 .disclaimer {
@@ -568,6 +585,7 @@ input::placeholder { color: var(--text-dim); }
           <span class="quota-suffix">req. restantes</span>
         </div>
 
+        <button class="btn btn-ghost" id="btn-profile" title="Changer de profil">👤 <span id="profile-name-label"></span></button>
         <button class="btn btn-ghost" id="btn-settings" aria-haspopup="dialog">⚙ Source &amp; clé API</button>
       </div>
     </div>
@@ -615,6 +633,11 @@ input::placeholder { color: var(--text-dim); }
           <span class="autopick-meta" id="autopick-meta">—</span>
         </div>
         <div id="autopick-body" class="autopick-body"></div>
+      </div>
+
+      <div class="watchlist-filter-row">
+        <label class="sr-only" for="watchlist-filter">Filtrer la watchlist</label>
+        <input type="text" id="watchlist-filter" placeholder="🔎 Filtrer par ticker ou nom d'entreprise…" autocomplete="off">
       </div>
 
       <div class="table-wrap">
@@ -768,9 +791,14 @@ input::placeholder { color: var(--text-dim); }
         </table>
       </div>
       <p class="hint">
-        Sélection curatée d'environ 150 grandes capitalisations mondiales (Amérique du Nord, Europe, Asie), tous secteurs confondus —
-        pas un classement exhaustif et vérifié des 3000 premières capitalisations mondiales (aucune API gratuite fiable ne l'expose),
-        mais un large échantillon représentatif. Chaque scan relance 1 requête Yahoo par valeur non encore en cache récent (&lt; 24 h).
+        Le scan combine une liste curatée d'environ 150 grandes capitalisations mondiales avec plusieurs listes calculées par
+        Yahoo Finance à partir de l'ensemble du marché (plus actives, plus fortes hausses/baisses, grandes capitalisations
+        sous-évaluées, valeurs technologiques en croissance…), ce qui couvre au total plusieurs milliers de valeurs distinctes
+        selon les jours — bien au-delà de ce qu'on pourrait analyser titre par titre sans se faire bloquer par Yahoo.
+        Ce n'est pas un classement exhaustif et vérifié des 3000-15 000 premières capitalisations mondiales (aucune API gratuite
+        fiable ne l'expose), mais un très large échantillon, orienté vers les valeurs qui bougent réellement.
+        Chaque scan relance 1 requête Yahoo par valeur non encore en cache récent (&lt; 24 h) ; un scan complet peut prendre
+        plusieurs minutes la première fois, puis beaucoup moins si relancé la même journée.
       </p>
     </section>
 
@@ -848,6 +876,61 @@ input::placeholder { color: var(--text-dim); }
 
 "use strict";
 
+/* ============================= PROFILS (identification simple, sans mot de passe) =============================
+   Chaque profil (un simple prénom) a ses propres données : watchlist, positions,
+   cache d'analyses, etc. Techniquement, toutes les clés localStorage de l'app sont
+   automatiquement préfixées par le profil actif via lsGet/lsSet (plus bas) — un seul
+   point de branchement, aucune autre fonction de l'app n'a besoin d'en avoir conscience.
+   Doit s'exécuter EN TOUT PREMIER, avant toute lecture de données (watchlist, cache...). */
+
+const PROFILES_KEY = "term_profiles";           // liste des prénoms connus (non namespacé)
+const CURRENT_PROFILE_KEY = "term_current_profile"; // profil actif (non namespacé)
+
+function loadProfileList() {
+  try { return JSON.parse(localStorage.getItem(PROFILES_KEY)) || []; } catch { return []; }
+}
+function saveProfileList(list) {
+  try { localStorage.setItem(PROFILES_KEY, JSON.stringify(list)); } catch { /* stockage plein, tant pis */ }
+}
+
+// Choisit (ou crée) le profil actif. Bloquant volontairement (window.prompt) : l'app
+// ne doit lire aucune donnée tant qu'on ne sait pas de quel profil il s'agit.
+function pickProfile() {
+  const profiles = loadProfileList();
+  const remembered = localStorage.getItem(CURRENT_PROFILE_KEY);
+  if (remembered && profiles.includes(remembered)) return remembered;
+
+  const hint = profiles.length ? `Profils existants : ${profiles.join(", ")}.\n\n` : "";
+  const input = window.prompt(`${hint}Quel est votre prénom ? (nouveau ou existant)`, profiles[0] || "");
+  const name = (input || "Invité").trim().slice(0, 24) || "Invité";
+  if (!profiles.includes(name)) {
+    profiles.push(name);
+    saveProfileList(profiles);
+  }
+  localStorage.setItem(CURRENT_PROFILE_KEY, name);
+  return name;
+}
+
+let currentProfile = pickProfile();
+
+// Change de profil actif et recharge la page : le plus simple et le plus fiable pour
+// que toutes les variables déjà initialisées (watchlist, cache, positions...) repartent
+// proprement du bon jeu de données, sans dupliquer la logique d'initialisation.
+function switchProfile() {
+  const profiles = loadProfileList();
+  const hint = profiles.length ? `Profils existants : ${profiles.join(", ")}.\n\n` : "";
+  const input = window.prompt(`${hint}Changer de profil — quel prénom ?`, currentProfile);
+  if (!input) return;
+  const name = input.trim().slice(0, 24);
+  if (!name) return;
+  if (!profiles.includes(name)) {
+    profiles.push(name);
+    saveProfileList(profiles);
+  }
+  localStorage.setItem(CURRENT_PROFILE_KEY, name);
+  location.reload();
+}
+
 /* ============================= CONSTANTES ============================= */
 
 const QUOTA_MAX = 25;          // Quota quotidien du plan gratuit Alpha Vantage
@@ -864,6 +947,7 @@ const LS = {
   quota:        "term_quota",
   autopickLast: "term_autopick_last",
   marketScanLast: "term_market_scan_last",
+  tickerNames: "term_ticker_names",
 };
 
 /* ============================= ÉTAT GLOBAL ============================= */
@@ -871,6 +955,7 @@ const LS = {
 let watchlist  = lsGet(LS.watchlist, []);   // ["AAPL", "MC.PA", ...]
 let cache      = lsGet(LS.cache, {});       // { TICKER: {updated, hist, ind} }
 let positions  = lsGet(LS.positions, []);   // [{id, ticker, qty, pru}]
+let tickerNames = lsGet(LS.tickerNames, {}); // { TICKER: "Nom de l'entreprise" }
 
 // Migration : les entrées mises en cache avant l'ajout du MACD / de la volatilité /
 // des performances multi-horizons n'ont pas ces champs sur `ind`. On les recalcule
@@ -878,7 +963,7 @@ let positions  = lsGet(LS.positions, []);   // [{id, ticker, qty, pru}]
 // au rendu (ex. onglet Marché/Analyse lisant ind.perf sur une entrée obsolète).
 for (const ticker of Object.keys(cache)) {
   const entry = cache[ticker];
-  if (entry && entry.hist && (!entry.ind || !entry.ind.perf)) {
+  if (entry && entry.hist && (!entry.ind || !entry.ind.perf || !entry.ind.bollinger || !entry.ind.stochastic)) {
     const ind = computeIndicators(entry.hist);
     const score = computeScore(ind);
     cache[ticker] = { ...entry, ind, score, signal: signalFromScore(score) };
@@ -890,6 +975,13 @@ let editingPositionId = null;               // id de la position en cours d'édi
 let allocationChart = null;                 // instance Chart.js
 let lastBuysimResult = null;                // dernier résultat simulé (simulateur d'achat), pour "Appliquer"
 let lastAllocationPlan = null;               // dernière répartition proposée (onglet Allocation), pour "Appliquer"
+
+// Cache du scan marché : EN MÉMOIRE UNIQUEMENT, jamais persisté dans localStorage.
+// Stocker l'historique complet (420 jours) de plusieurs milliers de valeurs dépasserait
+// vite le quota du navigateur (~5-10 Mo) — seule la watchlist (choix explicite de
+// l'utilisateur) mérite d'être conservée entre deux visites. Un ticker scanné et
+// ajouté à la watchlist est "promu" vers le cache persistant (voir addTickerToWatchlist).
+let marketCache = {};
 
 // Identifiants uniques pour les positions, même en cas de créations multiples
 // dans la même milliseconde (ex. application d'une répartition sur plusieurs lignes).
@@ -913,9 +1005,15 @@ function applyPurchase(ticker, price, amount) {
 
 /* ============================= HELPERS localStorage ============================= */
 
+// Toutes les clés sont automatiquement scopées au profil actif (voir section PROFILS
+// tout en haut du script) : aucun autre appelant n'a besoin de s'en soucier.
+function profileScopedKey(key) {
+  return `${key}::${currentProfile}`;
+}
+
 function lsGet(key, fallback) {
   try {
-    const raw = localStorage.getItem(key);
+    const raw = localStorage.getItem(profileScopedKey(key));
     return raw === null ? fallback : JSON.parse(raw);
   } catch {
     return fallback;
@@ -924,7 +1022,7 @@ function lsGet(key, fallback) {
 
 function lsSet(key, value) {
   try {
-    localStorage.setItem(key, JSON.stringify(value));
+    localStorage.setItem(profileScopedKey(key), JSON.stringify(value));
   } catch (e) {
     toast("Impossible d'écrire dans localStorage (stockage plein ?).", "error");
   }
@@ -1208,7 +1306,34 @@ function computeIndicators(hist) {
   const perfSince = n => c.length > n ? ((c[0] - c[n]) / c[n]) * 100 : null;
   const perf = { w1: perfSince(5), m1: perfSince(21), m3: perfSince(63), m6: perfSince(126), y1: perfSince(252) };
 
-  return { price, changePct, rsi, sma50, sma200, high52, low52, rangePos, macd, vol, perf };
+  // --- Bandes de Bollinger (20 jours, ±2 écarts-types) ---
+  let bollinger = null;
+  if (c.length >= 20) {
+    const window20 = c.slice(0, 20);
+    const sma20 = window20.reduce((a, b) => a + b, 0) / 20;
+    const variance20 = window20.reduce((a, b) => a + (b - sma20) ** 2, 0) / 20;
+    const stdev20 = Math.sqrt(variance20);
+    const upper = sma20 + 2 * stdev20;
+    const lower = sma20 - 2 * stdev20;
+    const percentB = upper > lower ? (price - lower) / (upper - lower) : 0.5;
+    bollinger = { sma20, upper, lower, percentB };
+  }
+
+  // --- Oscillateur stochastique 14 jours — approximation à partir des seules clôtures
+  // (pas de plus haut/bas intrajournalier disponible avec une source EOD gratuite). ---
+  let stochastic = null;
+  if (c.length >= 14) {
+    const kFor = offset => {
+      const w = c.slice(offset, offset + 14);
+      const h = Math.max(...w), l = Math.min(...w);
+      return h > l ? ((c[offset] - l) / (h - l)) * 100 : 50;
+    };
+    const kValues = [];
+    for (let i = 0; i < 3 && c.length >= 14 + i; i++) kValues.push(kFor(i));
+    stochastic = { k: kValues[0], d: kValues.reduce((a, b) => a + b, 0) / kValues.length };
+  }
+
+  return { price, changePct, rsi, sma50, sma200, high52, low52, rangePos, macd, vol, perf, bollinger, stochastic };
 }
 
 // Moyenne mobile exponentielle (série chronologique ancien → récent).
@@ -1262,25 +1387,27 @@ function signalFromScore(score) {
  * mise en cache. Toute erreur est affichée en toast, jamais de crash silencieux.
  */
 async function analyzeTicker(ticker, button, opts = {}) {
-  const { silent = false } = opts;
+  const { silent = false, skipRender = false, store = cache } = opts;
   if (button) { button.disabled = true; button.textContent = "…"; }
   try {
     const hist = await fetchDailySeries(ticker);
     const ind = computeIndicators(hist);
     const score = computeScore(ind);
-    cache[ticker] = {
+    store[ticker] = {
       updated: new Date().toISOString(),
       hist,                 // historique tronqué → cache réutilisable hors quota
       ind,
       score,
       signal: signalFromScore(score),
     };
-    lsSet(LS.cache, cache);
-    if (!silent) toast(`${ticker} analysé — score ${score}/100 (${cache[ticker].signal}).`, "success");
+    // Seul le cache persistant (watchlist) est écrit en localStorage — le cache du
+    // scan marché (store === marketCache) reste volontairement en mémoire.
+    if (store === cache) lsSet(LS.cache, cache);
+    if (!silent) toast(`${ticker} analysé — score ${score}/100 (${store[ticker].signal}).`, "success");
   } catch (err) {
     if (!silent) toast(err.message || `Erreur inconnue sur ${ticker}.`, err.type === "avlimit" || err.type === "quota" ? "warn" : "error");
   } finally {
-    renderAll();
+    if (!skipRender) renderAll();
   }
 }
 
@@ -1442,8 +1569,9 @@ attachTickerAutocomplete(
   document.getElementById("input-ticker"),
   document.getElementById("ticker-suggestions"),
   item => {
-    document.getElementById("input-ticker").value = item.symbol;
-    document.getElementById("form-add-ticker").requestSubmit();
+    if (addTickerToWatchlist(item.symbol, item.name)) {
+      document.getElementById("input-ticker").value = "";
+    }
   }
 );
 
@@ -1452,11 +1580,23 @@ attachTickerAutocomplete(
   document.getElementById("pos-ticker-suggestions"),
   item => {
     document.getElementById("pos-ticker").value = item.symbol;
+    rememberTickerName(item.symbol, item.name);
     document.getElementById("pos-qty").focus();
   }
 );
 
 /* ============================= ONGLET 1 : DASHBOARD ============================= */
+
+// Filtre texte de la watchlist (page 1) : recherche par ticker ou nom d'entreprise,
+// utile dès qu'il y a beaucoup de lignes à retrouver.
+let watchlistFilterQuery = "";
+
+function matchesWatchlistFilter(ticker) {
+  if (!watchlistFilterQuery) return true;
+  const q = watchlistFilterQuery.toLowerCase();
+  const name = (tickerNames[ticker] || "").toLowerCase();
+  return ticker.toLowerCase().includes(q) || name.includes(q);
+}
 
 function renderWatchlist() {
   const tbody = document.getElementById("watchlist-body");
@@ -1467,7 +1607,13 @@ function renderWatchlist() {
     return;
   }
 
-  for (const ticker of watchlist) {
+  const filtered = watchlist.filter(matchesWatchlistFilter);
+  if (filtered.length === 0) {
+    tbody.innerHTML = `<tr><td colspan="11" class="na">Aucun résultat pour « ${esc(watchlistFilterQuery)} ».</td></tr>`;
+    return;
+  }
+
+  for (const ticker of filtered) {
     const entry = cache[ticker];
     const tr = document.createElement("tr");
 
@@ -1475,7 +1621,7 @@ function renderWatchlist() {
       const { ind, score, signal } = entry;
       const stale = isStale(entry) ? `<span class="stale-badge" title="Données de plus de 24 h">cache</span>` : "";
       tr.innerHTML = `
-        <td><span class="cell-ticker">${esc(ticker)}</span>${stale}</td>
+        <td>${tickerCellHtml(ticker)}${stale}</td>
         <td class="num">${fnum(ind.price)}</td>
         <td class="num ${pctClass(ind.changePct)}">${fpct(ind.changePct)}</td>
         <td class="num ${ind.rsi !== null && ind.rsi <= 30 ? "up" : ind.rsi >= 70 ? "down" : ""}">${ind.rsi === null ? "—" : fmtNum.format(ind.rsi)}</td>
@@ -1499,7 +1645,7 @@ function renderWatchlist() {
         <td class="actions-col"></td>`;
     } else {
       tr.innerHTML = `
-        <td><span class="cell-ticker">${esc(ticker)}</span></td>
+        <td>${tickerCellHtml(ticker)}</td>
         <td class="num na">—</td><td class="num na">—</td><td class="num na">—</td>
         <td class="num na">—</td><td class="num na">—</td><td class="na">—</td>
         <td class="num na">—</td><td class="na">—</td><td class="na">jamais</td>
@@ -1536,7 +1682,40 @@ function renderWatchlist() {
 
 // Ajoute un ticker à la watchlist (réutilisé par le formulaire et l'onglet Marché).
 // Pas de limite de taille : Yahoo Finance (source par défaut) est gratuit et illimité.
-function addTickerToWatchlist(ticker) {
+// Mémorise le nom d'une entreprise pour un ticker (affichage plus lisible que le seul
+// symbole boursier). Persisté par profil, réutilisé partout où le ticker est affiché.
+function rememberTickerName(ticker, name) {
+  if (!ticker || !name || tickerNames[ticker] === name) return;
+  tickerNames[ticker] = name;
+  lsSet(LS.tickerNames, tickerNames);
+}
+
+// Résolution best-effort en tâche de fond quand on ne connaît pas encore le nom
+// (ex. ticker tapé à la main sans passer par la recherche). Ne bloque rien, échoue
+// silencieusement si le serveur n'est pas disponible (mode file://, etc.).
+async function resolveTickerName(ticker) {
+  if (tickerNames[ticker] || location.protocol === "file:") return;
+  try {
+    const resp = await fetch("/api/search?q=" + encodeURIComponent(ticker));
+    const data = await resp.json();
+    if (data.error || !Array.isArray(data.results)) return;
+    const match = data.results.find(r => r.symbol === ticker) || data.results[0];
+    if (match) { rememberTickerName(ticker, match.name); renderAll(); }
+  } catch { /* best-effort : pas grave si ça échoue */ }
+}
+
+// Affiche "Nom (TICKER)" si le nom est connu, sinon juste le ticker.
+function tickerDisplayName(ticker) {
+  return tickerNames[ticker] || null;
+}
+
+// Cellule ticker + nom d'entreprise (sur 2 lignes) si le nom est connu, sinon le ticker seul.
+function tickerCellHtml(ticker) {
+  const name = tickerDisplayName(ticker);
+  return `<span class="cell-ticker">${esc(ticker)}</span>${name ? `<div class="cell-company">${esc(name)}</div>` : ""}`;
+}
+
+function addTickerToWatchlist(ticker, name) {
   if (!ticker || !/^[A-Z0-9.\-]{1,12}$/.test(ticker)) {
     toast("Format de ticker invalide (lettres, chiffres, points et tirets uniquement).", "error");
     return false;
@@ -1547,9 +1726,22 @@ function addTickerToWatchlist(ticker) {
   }
   watchlist.push(ticker);
   lsSet(LS.watchlist, watchlist);
+  // Promotion : si le ticker a déjà été analysé via le scan marché (cache mémoire),
+  // on récupère cette analyse dans le cache persistant plutôt que de la refaire.
+  if (marketCache[ticker] && !cache[ticker]) {
+    cache[ticker] = marketCache[ticker];
+    lsSet(LS.cache, cache);
+  }
+  if (name) rememberTickerName(ticker, name);
+  else resolveTickerName(ticker);
   renderAll();
   return true;
 }
+
+document.getElementById("watchlist-filter").addEventListener("input", e => {
+  watchlistFilterQuery = e.target.value.trim();
+  renderWatchlist();
+});
 
 document.getElementById("form-add-ticker").addEventListener("submit", e => {
   e.preventDefault();
@@ -1605,6 +1797,7 @@ function renderAutopick() {
     div.innerHTML = `
       <span class="ap-rank">#${i + 1}</span>
       <span class="ap-ticker">${esc(p.ticker)}</span>
+      ${tickerDisplayName(p.ticker) ? `<span class="muted">${esc(tickerDisplayName(p.ticker))}</span>` : ""}
       <span class="ap-score">${p.entry.score}/100</span>
       <span class="signal signal-achat">Achat</span>
       <span class="muted">${fnum(p.entry.ind.price)}</span>`;
@@ -1830,7 +2023,10 @@ function renderAllocationChart() {
 attachTickerAutocomplete(
   document.getElementById("buysim-ticker"),
   document.getElementById("buysim-suggestions"),
-  item => { document.getElementById("buysim-ticker").value = item.symbol; }
+  item => {
+    document.getElementById("buysim-ticker").value = item.symbol;
+    rememberTickerName(item.symbol, item.name);
+  }
 );
 
 document.getElementById("form-buysim").addEventListener("submit", async e => {
@@ -1975,12 +2171,29 @@ function buildAnalysisText(ticker, entry) {
       + (ind.vol >= 40 ? " Amplitude de mouvement importante : à calibrer dans la taille de position et la gestion du risque." : ""));
   }
 
+  // Bandes de Bollinger
+  if (ind.bollinger) {
+    const pb = ind.bollinger.percentB;
+    if (pb <= 0.2) parts.push(`Bandes de Bollinger (20j) : le cours est proche ou sous la bande inférieure (%B = ${fmtNum.format(pb * 100)} %) — configuration de survente potentielle.`);
+    else if (pb >= 0.8) parts.push(`Bandes de Bollinger (20j) : le cours est proche ou au-dessus de la bande supérieure (%B = ${fmtNum.format(pb * 100)} %) — configuration de surachat potentielle.`);
+    else parts.push(`Bandes de Bollinger (20j) : le cours évolue dans la partie médiane du canal (%B = ${fmtNum.format(pb * 100)} %).`);
+  }
+
+  // Oscillateur stochastique
+  if (ind.stochastic) {
+    if (ind.stochastic.k <= 20) parts.push(`Oscillateur stochastique 14 jours : %K à ${fmtNum.format(ind.stochastic.k)} (zone de survente), signal potentiellement haussier à très court terme.`);
+    else if (ind.stochastic.k >= 80) parts.push(`Oscillateur stochastique 14 jours : %K à ${fmtNum.format(ind.stochastic.k)} (zone de surachat), signal potentiellement baissier à très court terme.`);
+    else parts.push(`Oscillateur stochastique 14 jours : %K à ${fmtNum.format(ind.stochastic.k)}, zone neutre.`);
+  }
+
   // Convergence des signaux
   let bullishCount = 0, totalCount = 0;
   if (ind.rsi !== null) { totalCount++; if (ind.rsi <= 50) bullishCount++; }
   if (ind.sma50 !== null && ind.sma200 !== null) { totalCount++; if (ind.sma50 > ind.sma200) bullishCount++; }
   if (ind.macd) { totalCount++; if (ind.macd.bullish) bullishCount++; }
   totalCount++; if (ind.rangePos <= 0.5) bullishCount++;
+  if (ind.bollinger) { totalCount++; if (ind.bollinger.percentB <= 0.5) bullishCount++; }
+  if (ind.stochastic) { totalCount++; if (ind.stochastic.k <= 50) bullishCount++; }
   parts.push(`Convergence des signaux : ${bullishCount}/${totalCount} orientés haussiers, ${totalCount - bullishCount}/${totalCount} orientés baissiers.`);
 
   // Synthèse score
@@ -1994,9 +2207,15 @@ function buildAnalysisStatsHtml(ind) {
   const volLabel = ind.vol === null ? "—" : `${fmtNum.format(ind.vol)} %`;
   const macdLabel = ind.macd ? (ind.macd.bullish ? "Haussier" : "Baissier") : "—";
   const macdClass = ind.macd ? (ind.macd.bullish ? "up" : "down") : "";
+  const bbLabel = ind.bollinger ? `${fmtNum.format(ind.bollinger.percentB * 100)} %` : "—";
+  const bbClass = ind.bollinger ? (ind.bollinger.percentB <= 0.2 ? "up" : ind.bollinger.percentB >= 0.8 ? "down" : "") : "";
+  const stoLabel = ind.stochastic ? fmtNum.format(ind.stochastic.k) : "—";
+  const stoClass = ind.stochastic ? (ind.stochastic.k <= 20 ? "up" : ind.stochastic.k >= 80 ? "down" : "") : "";
   const items = [
     ["Volatilité (3M, ann.)", volLabel, ""],
     ["MACD 12/26/9", macdLabel, macdClass],
+    ["Bollinger %B (20j)", bbLabel, bbClass],
+    ["Stochastique %K (14j)", stoLabel, stoClass],
     ["Perf. 1 mois", fpct(ind.perf.m1), pctClass(ind.perf.m1)],
     ["Perf. 3 mois", fpct(ind.perf.m3), pctClass(ind.perf.m3)],
     ["Perf. 1 an", fpct(ind.perf.y1), pctClass(ind.perf.y1)],
@@ -2018,6 +2237,43 @@ const CHART_PERIODS = [
 ];
 let openCharts = {};             // { TICKER: { period: "1a" } } — présence = courbe affichée
 let analysisChartInstances = {}; // { TICKER: instance Chart.js } — pour destroy() avant re-création
+
+// Actualités par ticker : fermées par défaut, chargées à la demande (1 requête par
+// ticker ouvert, mise en cache mémoire pour la session — pas persistée, les actus
+// changent vite et n'ont pas vocation à rester en localStorage indéfiniment).
+let openNews = {};      // { TICKER: true } — présence = bloc actus affiché
+let newsCache = {};     // { TICKER: [{title, link, publisher, date}] }
+let newsPending = new Set(); // tickers dont le chargement est déjà en cours (évite les doublons)
+
+async function loadNews(ticker) {
+  try {
+    const resp = await fetch("/api/news?symbol=" + encodeURIComponent(ticker));
+    const data = await resp.json();
+    newsCache[ticker] = (!data.error && Array.isArray(data.news)) ? data.news : [];
+  } catch {
+    newsCache[ticker] = [];
+  }
+}
+
+function renderNewsBlock(ticker) {
+  const items = newsCache[ticker];
+  if (!items) {
+    if (!newsPending.has(ticker)) {
+      newsPending.add(ticker);
+      loadNews(ticker).then(() => { newsPending.delete(ticker); renderAnalysis(); });
+    }
+    return `<div class="analysis-news"><p class="hint">Chargement des actualités…</p></div>`;
+  }
+  if (items.length === 0) {
+    return `<div class="analysis-news"><p class="hint">Aucune actualité récente trouvée pour ${esc(ticker)}.</p></div>`;
+  }
+  const rows = items.map(n => `
+    <li>
+      <a href="${esc(n.link)}" target="_blank" rel="noopener">${esc(n.title)}</a>
+      <span class="muted">${esc(n.publisher || "")}${n.date ? " · " + esc(n.date) : ""}</span>
+    </li>`).join("");
+  return `<div class="analysis-news"><ul class="news-list">${rows}</ul></div>`;
+}
 
 function fdateShort(iso) {
   return new Date(iso).toLocaleDateString("fr-FR", { day: "2-digit", month: "2-digit" });
@@ -2099,12 +2355,17 @@ function renderAnalysis() {
         </div>
       </div>` : "";
 
+    const newsOpen = !!openNews[ticker];
+    const newsHtml = newsOpen ? renderNewsBlock(ticker) : "";
+
     card.innerHTML = `
-      <h3>${esc(ticker)} <span class="signal signal-${entry.signal.toLowerCase()}">${entry.signal}</span>
+      <h3>${esc(ticker)}${tickerDisplayName(ticker) ? ` <span class="muted">— ${esc(tickerDisplayName(ticker))}</span>` : ""} <span class="signal signal-${entry.signal.toLowerCase()}">${entry.signal}</span>
         <button type="button" class="btn btn-small btn-ghost btn-chart-toggle" data-ticker="${esc(ticker)}">${chartState ? "▲ Masquer la courbe" : "📈 Afficher la courbe"}</button>
+        <button type="button" class="btn btn-small btn-ghost btn-news-toggle" data-ticker="${esc(ticker)}">${newsOpen ? "▲ Masquer les actus" : "📰 Actualités"}</button>
       </h3>
       ${buildAnalysisStatsHtml(entry.ind)}
       ${chartHtml}
+      ${newsHtml}
       ${paragraphs}
       <p class="meta">Données du ${fdate(entry.updated)}${isStale(entry) ? " — cache de plus de 24 h, pensez à relancer une analyse si le quota le permet" : ""}.</p>`;
     container.appendChild(card);
@@ -2130,6 +2391,14 @@ document.getElementById("analysis-container").addEventListener("click", e => {
   const periodBtn = e.target.closest(".period-btn");
   if (periodBtn && openCharts[periodBtn.dataset.ticker]) {
     openCharts[periodBtn.dataset.ticker].period = periodBtn.dataset.period;
+    renderAnalysis();
+    return;
+  }
+  const newsBtn = e.target.closest(".btn-news-toggle");
+  if (newsBtn) {
+    const ticker = newsBtn.dataset.ticker;
+    if (openNews[ticker]) delete openNews[ticker];
+    else openNews[ticker] = true;
     renderAnalysis();
   }
 });
@@ -2210,6 +2479,37 @@ async function runPool(items, worker, concurrency) {
   await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, next));
 }
 
+// Catégories de listes prédéfinies Yahoo ("screeners") : chacune est déjà calculée
+// côté Yahoo à partir de l'ensemble du marché (plusieurs milliers de titres), ce qui
+// permet de couvrir un univers bien plus large que ce qu'on pourrait analyser titre
+// par titre nous-mêmes (Yahoo bloquerait un balayage manuel de 10-15 000 requêtes).
+const SCREENER_CATEGORIES = [
+  "day_gainers", "day_losers", "most_actives", "undervalued_large_caps",
+  "growth_technology_stocks", "aggressive_small_caps", "small_cap_gainers",
+  "undervalued_growth_stocks", "most_shorted_stocks",
+];
+
+// Univers courant analysé/classé par le scan marché : démarre avec la liste curatée
+// statique, puis s'étend avec les résultats des screeners au premier scan de la session.
+let marketCandidates = [...MARKET_UNIVERSE];
+
+async function fetchScreenerCandidates() {
+  const perCategory = await Promise.all(SCREENER_CATEGORIES.map(async scrId => {
+    try {
+      const resp = await fetch(`/api/screener?scrId=${scrId}&count=250`);
+      const data = await resp.json();
+      return (!data.error && Array.isArray(data.results)) ? data.results : [];
+    } catch {
+      return [];
+    }
+  }));
+  const merged = new Map(MARKET_UNIVERSE.map(m => [m.symbol, m]));
+  for (const item of perCategory.flat()) {
+    if (item.symbol && !merged.has(item.symbol)) merged.set(item.symbol, { symbol: item.symbol, name: item.name });
+  }
+  return [...merged.values()];
+}
+
 async function runMarketScan() {
   if (getSource() !== "yahoo") {
     toast("Le scan du marché nécessite la source Yahoo (gratuite, illimitée). Changez de source dans « ⚙ Source & clé API ».", "warn");
@@ -2219,39 +2519,66 @@ async function runMarketScan() {
   const btn = document.getElementById("btn-market-scan");
   const status = document.getElementById("market-status");
   btn.disabled = true;
+  status.textContent = "Récupération des listes de marché (screeners Yahoo)…";
+
+  marketCandidates = await fetchScreenerCandidates();
+  marketCandidates.forEach(c => rememberTickerName(c.symbol, c.name));
+
   let done = 0;
-  const total = MARKET_UNIVERSE.length;
+  const total = marketCandidates.length;
   status.textContent = `Analyse en cours… 0/${total}`;
 
-  await runPool(MARKET_UNIVERSE, async ({ symbol }) => {
-    const entry = cache[symbol];
+  await runPool(marketCandidates, async ({ symbol }) => {
+    // Si le ticker est déjà suivi (watchlist), on garde son cache persistant à jour ;
+    // sinon on utilise le cache mémoire du scan marché (voir déclaration de marketCache).
+    const target = cache[symbol] ? cache : marketCache;
+    const entry = target[symbol];
     if (!entry || isStale(entry)) {
-      await analyzeTicker(symbol, null, { silent: true });
+      // skipRender: un scan de plusieurs milliers de valeurs ne doit pas déclencher
+      // un renderAll() complet à CHAQUE ticker (coûteux, et ça écraserait le message
+      // de progression) — le tableau est rafraîchi par paliers juste après.
+      await analyzeTicker(symbol, null, { silent: true, skipRender: true, store: target });
     }
     done++;
-    status.textContent = `Analyse en cours… ${done}/${total}`;
-    renderMarketResults(); // classement mis à jour au fur et à mesure
-  }, 5);
+    // Rafraîchit l'affichage par paliers (pas à chaque ticker) pour ne pas
+    // surcharger le rendu sur un univers de plusieurs milliers de valeurs.
+    // renderMarketTable() seul (pas renderMarketResults()) pour ne pas écraser
+    // ce message de progression avec le texte "Dernier scan..." du statut.
+    if (done % 25 === 0 || done === total) {
+      status.textContent = `Analyse en cours… ${done}/${total}`;
+      renderMarketTable();
+    }
+  }, 8);
 
   lsSet(LS.marketScanLast, new Date().toISOString());
   btn.disabled = false;
-  renderMarketResults();
-  toast("Scan du marché terminé.", "success");
+  // renderAll() (pas seulement renderMarketResults()) : des tickers scannés peuvent
+  // aussi être dans la watchlist / les picks auto, qu'on n'a pas rafraîchis pendant
+  // la boucle (skipRender) pour des raisons de performance.
+  renderAll();
+  toast(`Scan du marché terminé (${total} valeurs passées en revue).`, "success");
 }
 
-function renderMarketResults() {
-  const tbody = document.getElementById("market-body");
+// Texte "Dernier scan..." — séparé du rendu du tableau pour ne pas écraser le
+// message de progression ("Analyse en cours… X/Y") pendant qu'un scan tourne.
+function updateMarketStatusText() {
   const status = document.getElementById("market-status");
-
   if (getSource() !== "yahoo") {
     status.textContent = "Le scan nécessite la source Yahoo (⚙ Source & clé API).";
-  } else {
-    const lastScan = lsGet(LS.marketScanLast, null);
-    status.textContent = lastScan ? `Dernier scan : ${fdate(lastScan)}` : "Aucun scan encore lancé.";
+    return;
   }
+  const lastScan = lsGet(LS.marketScanLast, null);
+  status.textContent = lastScan
+    ? `Dernier scan : ${fdate(lastScan)} — ${marketCandidates.length} valeurs passées en revue`
+    : "Aucun scan encore lancé.";
+}
 
-  const ranked = MARKET_UNIVERSE
-    .map(m => ({ ...m, entry: cache[m.symbol] }))
+// Reconstruit uniquement le tableau de classement (n'écrase pas le texte de statut) —
+// utilisé pour les rafraîchissements en cours de scan.
+function renderMarketTable() {
+  const tbody = document.getElementById("market-body");
+  const ranked = marketCandidates
+    .map(m => ({ ...m, entry: cache[m.symbol] || marketCache[m.symbol] }))
     .filter(m => m.entry)
     .sort((a, b) => b.entry.score - a.entry.score)
     .slice(0, 30);
@@ -2281,11 +2608,19 @@ function renderMarketResults() {
       const btnAdd = document.createElement("button");
       btnAdd.className = "btn btn-small btn-accent";
       btnAdd.textContent = "+ Ajouter";
-      btnAdd.addEventListener("click", () => addTickerToWatchlist(m.symbol));
+      btnAdd.addEventListener("click", () => addTickerToWatchlist(m.symbol, m.name));
       actions.appendChild(btnAdd);
     }
     tbody.appendChild(tr);
   });
+}
+
+// Rendu complet (statut + tableau) — utilisé partout SAUF pendant la boucle de
+// progression d'un scan (où seul renderMarketTable() est appelé, pour ne pas
+// écraser le message "Analyse en cours…").
+function renderMarketResults() {
+  updateMarketStatusText();
+  renderMarketTable();
 }
 
 document.getElementById("btn-market-scan").addEventListener("click", runMarketScan);
@@ -2296,8 +2631,11 @@ renderMarketResults(); // affichage initial depuis le cache existant (watchlist 
 // Meilleures opportunités toutes sources confondues (watchlist + scan marché),
 // à la différence de computeTopPicks() qui ne regarde que la watchlist.
 function bestOpportunities(limit = 5) {
-  return Object.keys(cache)
-    .map(t => ({ ticker: t, entry: cache[t] }))
+  // cache (watchlist, persistant) ET marketCache (scan marché, mémoire) — cache est
+  // prioritaire en cas de doublon (analyse plus susceptible d'être à jour/complète).
+  const merged = { ...marketCache, ...cache };
+  return Object.keys(merged)
+    .map(t => ({ ticker: t, entry: merged[t] }))
     .filter(x => x.entry && x.entry.signal === "Achat")
     .sort((a, b) => b.entry.score - a.entry.score)
     .slice(0, limit);
@@ -2395,6 +2733,9 @@ document.addEventListener("keydown", e => {
 
 /* ============================= MODALE CLÉ API ============================= */
 
+document.getElementById("profile-name-label").textContent = currentProfile;
+document.getElementById("btn-profile").addEventListener("click", switchProfile);
+
 const settingsDialog = document.getElementById("settings-dialog");
 
 document.getElementById("btn-settings").addEventListener("click", () => {
@@ -2433,6 +2774,10 @@ function renderAll() {
 /* ============================= INITIALISATION ============================= */
 
 renderAll();
+
+// Rattrapage best-effort des noms manquants pour des tickers déjà en watchlist
+// (ajoutés avant cette fonctionnalité, ou tapés à la main sans passer par la recherche).
+watchlist.filter(t => !tickerNames[t]).forEach(resolveTickerName);
 
 // Guidage au lancement selon la source et le mode d'ouverture.
 if (getSource() === "yahoo" && location.protocol === "file:") {
