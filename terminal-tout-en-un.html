@@ -438,6 +438,22 @@ input::placeholder { color: var(--text-dim); }
 
 /* ============================= ANALYSE ============================= */
 
+/* --- Bloc analyse fondamentale --- */
+.fund-heading { font-size: 12px; text-transform: uppercase; letter-spacing: 1px; color: var(--amber); margin: 16px 0 8px; border-top: 1px solid var(--border); padding-top: 12px; }
+.fund-unavailable { color: var(--text-dim); font-style: italic; margin: 0; }
+.fund-scores { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
+.fund-score-badge { display: flex; flex-direction: column; align-items: flex-start; padding: 8px 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg-raised); }
+.fund-score-global { border-color: var(--amber); }
+.fund-score-num { font-size: 22px; font-weight: 700; font-family: var(--mono); color: var(--text); }
+.fund-score-cap { font-size: 10px; text-transform: uppercase; letter-spacing: 1px; color: var(--text-dim); }
+.fund-verdict { font-size: 11px; margin-top: 2px; color: var(--text); }
+.fund-pillar { display: grid; grid-template-columns: 140px 1fr 60px; align-items: center; gap: 8px; margin: 5px 0; font-size: 12px; color: var(--text); }
+.fund-pillar-bar { background: var(--border); height: 8px; border-radius: 4px; overflow: hidden; }
+.fund-pillar-bar > span { display: block; height: 100%; background: var(--amber); }
+.fund-pillar-val { text-align: right; color: var(--text-dim); font-family: var(--mono); }
+.fund-metrics { margin-top: 10px; }
+.fund-caveat { font-size: 10px; color: var(--text-dim); margin-top: 8px; font-style: italic; }
+
 .analysis-container { display: grid; gap: 14px; }
 .analysis-card {
   background: var(--bg-panel);
@@ -962,6 +978,11 @@ let tickerNames = lsGet(LS.tickerNames, {}); // { TICKER: "Nom de l'entreprise" 
 // Réglable via le curseur de l'onglet Analyse, persistée par profil.
 let weightTech = clamp01(Number(lsGet(LS.weightTech, 0.5)));
 
+// Poids des piliers du score fondamental. Déclaré ici (et non dans le bloc SCORE
+// FONDAMENTAL plus bas) car la boucle de migration ci-dessous appelle computeFundScore
+// au chargement : une const déclarée plus tard serait dans sa zone morte temporelle (TDZ).
+const FUND_PILLAR_WEIGHTS = { valuation: 0.35, profitability: 0.30, growth: 0.20, health: 0.15 };
+
 // Migration : les entrées mises en cache avant l'ajout du MACD / de la volatilité /
 // des performances multi-horizons n'ont pas ces champs sur `ind`. On les recalcule
 // depuis l'historique déjà stocké (aucun nouvel appel réseau) pour éviter un plantage
@@ -1466,8 +1487,6 @@ function scoreHealth(f) {
   const bonus = (dy == null || !isFinite(dy)) ? 0 : Math.min(0.3, Math.max(0, dy * 100 * 0.1));
   return Math.min(1, base + bonus);
 }
-
-const FUND_PILLAR_WEIGHTS = { valuation: 0.35, profitability: 0.30, growth: 0.20, health: 0.15 };
 
 function fundVerdict(total) {
   if (total >= 65) return "Sous-évalué / solide";
@@ -2381,6 +2400,92 @@ function buildAnalysisStatsHtml(ind) {
     + `</dl>`;
 }
 
+// Capitalisation lisible : milliers de milliards (Bn), milliards (Md), millions (M).
+function fmtMarketCap(v, currency) {
+  if (v === null || v === undefined || !isFinite(v)) return "—";
+  const cur = currency ? " " + currency : "";
+  const abs = Math.abs(v);
+  if (abs >= 1e12) return fmtNum.format(v / 1e12) + " Bn" + cur;   // billions (10^12)
+  if (abs >= 1e9)  return fmtNum.format(v / 1e9) + " Md" + cur;    // milliards
+  if (abs >= 1e6)  return fmtNum.format(v / 1e6) + " M" + cur;     // millions
+  return fmtNum.format(v) + cur;
+}
+
+// Affiche une fraction (0.253) en pourcentage (25,3 %). null → "—".
+function ffrac(v) { return v === null || v === undefined || !isFinite(v) ? "—" : fpct(v * 100); }
+
+// Bloc fondamental complet pour une carte d'analyse.
+function buildFundamentalStatsHtml(entry) {
+  const f = entry.fund, fs = entry.fundScore;
+  if (!f || !fs) {
+    return `<div class="fund-block"><p class="fund-unavailable">Données fondamentales indisponibles pour ce titre (ETF, indice, ou source momentanément inaccessible). L'analyse technique reste valable.</p></div>`;
+  }
+  const metrics = [
+    ["Capitalisation", fmtMarketCap(f.marketCap, f.currency), ""],
+    ["PER (12 m)", fnum(f.trailingPE), ""],
+    ["PER prévisionnel", fnum(f.forwardPE), ""],
+    ["PEG", fnum(f.pegRatio), ""],
+    ["Price / Book", fnum(f.priceToBook), ""],
+    ["EV / EBITDA", fnum(f.enterpriseToEbitda), ""],
+    ["Marge nette", ffrac(f.profitMargins), pctClass(f.profitMargins)],
+    ["Marge opér.", ffrac(f.operatingMargins), pctClass(f.operatingMargins)],
+    ["ROE", ffrac(f.returnOnEquity), pctClass(f.returnOnEquity)],
+    ["ROA", ffrac(f.returnOnAssets), pctClass(f.returnOnAssets)],
+    ["Croissance CA", ffrac(f.revenueGrowth), pctClass(f.revenueGrowth)],
+    ["Croissance bénéf.", ffrac(f.earningsGrowth), pctClass(f.earningsGrowth)],
+    ["Dette / capitaux propres", f.debtToEquity === null ? "—" : fnum(f.debtToEquity / 100), ""],
+    ["Ratio de liquidité", fnum(f.currentRatio), ""],
+    ["Rendement dividende", ffrac(f.dividendYield), ""],
+  ];
+  const grid = `<dl class="impact-grid fund-metrics">`
+    + metrics.map(([k, v, cls]) => `<div><dt>${esc(k)}</dt><dd class="${cls}">${esc(v)}</dd></div>`).join("")
+    + `</dl>`;
+
+  const pillarLabels = { valuation: "Valorisation", profitability: "Rentabilité", growth: "Croissance", health: "Santé + dividende" };
+  const pillars = Object.keys(pillarLabels).map(k => {
+    const val = fs.pillars[k];
+    const disp = val === null ? "—" : `${val}/100`;
+    const width = val === null ? 0 : val;
+    return `<div class="fund-pillar"><span class="fund-pillar-label">${esc(pillarLabels[k])}</span>`
+      + `<span class="fund-pillar-bar"><span style="width:${width}%"></span></span>`
+      + `<span class="fund-pillar-val">${esc(disp)}</span></div>`;
+  }).join("");
+
+  const global = computeGlobalScore(entry);
+  return `<div class="fund-block">
+    <div class="fund-scores">
+      <div class="fund-score-badge"><span class="fund-score-num">${fs.total}</span><span class="fund-score-cap">Score fondamental /100</span><span class="fund-verdict">${esc(fs.verdict)}</span></div>
+      <div class="fund-score-badge fund-score-global"><span class="fund-score-num">${global}</span><span class="fund-score-cap">Score global /100</span><span class="fund-verdict">${Math.round(weightTech*100)}% tech / ${Math.round((1-weightTech)*100)}% fonda</span></div>
+    </div>
+    ${pillars}
+    ${grid}
+    <p class="fund-caveat">Seuils de valorisation absolus, non ajustés par secteur : à interpréter avec le contexte du secteur. Analyse descriptive, pas un conseil.</p>
+  </div>`;
+}
+
+// Texte de synthèse fondamental en français, descriptif.
+function buildFundamentalText(fund, fundScore) {
+  if (!fund || !fundScore) return [];
+  const f = fund, parts = [];
+  if (f.trailingPE !== null) {
+    const q = f.trailingPE <= 0 ? "négatif (bénéfices négatifs)" : f.trailingPE < 15 ? "bas" : f.trailingPE > 30 ? "élevé" : "modéré";
+    parts.push(`Valorisation : PER de ${fnum(f.trailingPE)} (${q})${f.forwardPE !== null ? `, PER prévisionnel ${fnum(f.forwardPE)}` : ""}${f.pegRatio !== null ? `, PEG ${fnum(f.pegRatio)}` : ""}. Note de valorisation : ${fundScore.pillars.valuation ?? "—"}/100.`);
+  }
+  if (f.profitMargins !== null || f.returnOnEquity !== null) {
+    parts.push(`Rentabilité : marge nette ${ffrac(f.profitMargins)}, ROE ${ffrac(f.returnOnEquity)}. Note de rentabilité : ${fundScore.pillars.profitability ?? "—"}/100.`);
+  }
+  if (f.revenueGrowth !== null || f.earningsGrowth !== null) {
+    parts.push(`Croissance : chiffre d'affaires ${ffrac(f.revenueGrowth)}, bénéfices ${ffrac(f.earningsGrowth)}. Note de croissance : ${fundScore.pillars.growth ?? "—"}/100.`);
+  }
+  const healthBits = [];
+  if (f.debtToEquity !== null) healthBits.push(`dette/capitaux propres ${fnum(f.debtToEquity / 100)}`);
+  if (f.currentRatio !== null) healthBits.push(`ratio de liquidité ${fnum(f.currentRatio)}`);
+  if (f.dividendYield !== null) healthBits.push(`rendement du dividende ${ffrac(f.dividendYield)}`);
+  if (healthBits.length) parts.push(`Santé financière : ${healthBits.join(", ")}. Note de santé : ${fundScore.pillars.health ?? "—"}/100.`);
+  parts.push(`Score fondamental global : ${fundScore.total}/100 → « ${fundScore.verdict} ». Agrégation pondérée des piliers disponibles (valorisation 35 %, rentabilité 30 %, croissance 20 %, santé 15 %).`);
+  return parts;
+}
+
 // Courbes de prix par ticker dans l'onglet Analyse : fermées par défaut, ouvertes
 // à la demande (l'utilisateur choisit s'il veut la courbe ou non), avec un choix de
 // période. 100 % réutilisé depuis l'historique déjà en cache — zéro requête réseau.
@@ -2498,7 +2603,9 @@ function renderAnalysis() {
     const entry = cache[ticker];
     const card = document.createElement("article");
     card.className = "analysis-card";
-    const paragraphs = buildAnalysisText(ticker, entry).map(p => `<p>${esc(p)}</p>`).join("");
+    const techParas = buildAnalysisText(ticker, entry).map(p => `<p>${esc(p)}</p>`).join("");
+    const fundParas = buildFundamentalText(entry.fund, entry.fundScore).map(p => `<p>${esc(p)}</p>`).join("");
+    const paragraphs = techParas + fundParas;
 
     const chartState = openCharts[ticker];
     const chartHtml = chartState ? `
@@ -2520,6 +2627,8 @@ function renderAnalysis() {
         <button type="button" class="btn btn-small btn-ghost btn-news-toggle" data-ticker="${esc(ticker)}">${newsOpen ? "▲ Masquer les actus" : "📰 Actualités"}</button>
       </h3>
       ${buildAnalysisStatsHtml(entry.ind)}
+      <h4 class="fund-heading">Analyse fondamentale</h4>
+      ${buildFundamentalStatsHtml(entry)}
       ${chartHtml}
       ${newsHtml}
       ${paragraphs}
