@@ -968,11 +968,16 @@ let weightTech = clamp01(Number(lsGet(LS.weightTech, 0.5)));
 // au rendu (ex. onglet Marché/Analyse lisant ind.perf sur une entrée obsolète).
 for (const ticker of Object.keys(cache)) {
   const entry = cache[ticker];
-  if (entry && entry.hist && (!entry.ind || !entry.ind.perf || !entry.ind.bollinger || !entry.ind.stochastic)) {
+  if (!entry) continue;
+  if (entry.hist && (!entry.ind || !entry.ind.perf || !entry.ind.bollinger || !entry.ind.stochastic)) {
     const ind = computeIndicators(entry.hist);
     const score = computeScore(ind);
     cache[ticker] = { ...entry, ind, score, signal: signalFromScore(score) };
   }
+  // Champs fondamentaux absents sur les entrées anciennes : normaliser à null,
+  // et recalculer fundScore si des fondamentaux sont déjà stockés.
+  if (cache[ticker].fund === undefined) cache[ticker].fund = null;
+  cache[ticker].fundScore = computeFundScore(cache[ticker].fund);
 }
 lsSet(LS.cache, cache);
 
@@ -1535,12 +1540,21 @@ async function analyzeTicker(ticker, button, opts = {}) {
     const hist = await fetchDailySeries(ticker);
     const ind = computeIndicators(hist);
     const score = computeScore(ind);
+
+    // Fondamentaux : facultatifs. Une panne ici ne doit pas casser l'analyse technique.
+    let fund = null;
+    try { fund = await fetchFundamentals(ticker); }
+    catch (e) { fund = null; /* silencieux : l'UI affichera « indisponible » */ }
+    const fundScore = computeFundScore(fund);
+
     store[ticker] = {
       updated: new Date().toISOString(),
       hist,                 // historique tronqué → cache réutilisable hors quota
       ind,
       score,
       signal: signalFromScore(score),
+      fund,
+      fundScore,
     };
     // Seul le cache persistant (watchlist) est écrit en localStorage — le cache du
     // scan marché (store === marketCache) reste volontairement en mémoire.
