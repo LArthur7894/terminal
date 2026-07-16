@@ -438,6 +438,13 @@ input::placeholder { color: var(--text-dim); }
 
 /* ============================= ANALYSE ============================= */
 
+/* --- Curseur de pondération du score global --- */
+.weight-control { margin: 4px 0 14px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg-panel); }
+.weight-control label { font-size: 12px; color: var(--text-dim); }
+.weight-control #weight-label { color: var(--text); font-family: var(--mono); }
+.weight-control input[type="range"] { width: 100%; margin-top: 8px; accent-color: var(--amber); }
+.weight-ends { display: flex; justify-content: space-between; font-size: 10px; color: var(--text-dim); }
+
 /* --- Bloc analyse fondamentale --- */
 .fund-heading { font-size: 12px; text-transform: uppercase; letter-spacing: 1px; color: var(--amber); margin: 16px 0 8px; border-top: 1px solid var(--border); padding-top: 12px; }
 .fund-unavailable { color: var(--text-dim); font-style: italic; margin: 0; }
@@ -776,6 +783,13 @@ input::placeholder { color: var(--text-dim); }
       <div class="panel-head">
         <h1>Synthèse par ticker</h1>
         <button class="btn btn-ghost" id="btn-refresh-analysis">↻ Régénérer depuis le cache</button>
+      </div>
+      <div class="weight-control">
+        <label for="weight-slider">Pondération du score global :
+          <strong id="weight-label">50 % technique / 50 % fondamental</strong>
+        </label>
+        <input type="range" id="weight-slider" min="0" max="100" step="5" value="50">
+        <span class="weight-ends"><span>100 % fonda</span><span>100 % tech</span></span>
       </div>
       <div id="analysis-container" class="analysis-container"></div>
     </section>
@@ -2669,6 +2683,25 @@ document.getElementById("analysis-container").addEventListener("click", e => {
 });
 
 document.getElementById("btn-refresh-analysis").addEventListener("click", renderAnalysis);
+
+// Curseur de pondération : la valeur du slider = part du TECHNIQUE (0..100).
+(function initWeightSlider() {
+  const slider = document.getElementById("weight-slider");
+  const label = document.getElementById("weight-label");
+  if (!slider || !label) return;
+  const paint = () => {
+    const tech = Math.round(weightTech * 100);
+    slider.value = tech;
+    label.textContent = `${tech} % technique / ${100 - tech} % fondamental`;
+  };
+  paint();
+  slider.addEventListener("input", () => {
+    weightTech = clamp01(Number(slider.value) / 100);
+    lsSet(LS.weightTech, weightTech);
+    label.textContent = `${Math.round(weightTech * 100)} % technique / ${Math.round((1 - weightTech) * 100)} % fondamental`;
+    renderAnalysis(); // recalcule tous les scores globaux affichés, sans requête réseau
+  });
+})();
 
 /* ============================= ONGLET 5 : MARCHÉ ============================= */
 
