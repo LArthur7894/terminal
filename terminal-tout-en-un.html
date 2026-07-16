@@ -1567,17 +1567,20 @@ async function fetchFundamentals(ticker) {
  * mise en cache. Toute erreur est affichée en toast, jamais de crash silencieux.
  */
 async function analyzeTicker(ticker, button, opts = {}) {
-  const { silent = false, skipRender = false, store = cache } = opts;
+  const { silent = false, skipRender = false, store = cache, skipFund = false } = opts;
   if (button) { button.disabled = true; button.textContent = "…"; }
   try {
     const hist = await fetchDailySeries(ticker);
     const ind = computeIndicators(hist);
     const score = computeScore(ind);
 
-    // Fondamentaux : facultatifs. Une panne ici ne doit pas casser l'analyse technique.
+    // Fondamentaux : facultatifs, et sautés en masse (scan marché) via skipFund.
+    // Une panne ici ne doit jamais casser l'analyse technique.
     let fund = null;
-    try { fund = await fetchFundamentals(ticker); }
-    catch (e) { fund = null; /* silencieux : l'UI affichera « indisponible » */ }
+    if (!skipFund) {
+      try { fund = await fetchFundamentals(ticker); }
+      catch (e) { fund = null; /* silencieux : l'UI affichera « indisponible » */ }
+    }
     const fundScore = computeFundScore(fund);
 
     store[ticker] = {
@@ -2835,7 +2838,7 @@ async function runMarketScan() {
       // skipRender: un scan de plusieurs milliers de valeurs ne doit pas déclencher
       // un renderAll() complet à CHAQUE ticker (coûteux, et ça écraserait le message
       // de progression) — le tableau est rafraîchi par paliers juste après.
-      await analyzeTicker(symbol, null, { silent: true, skipRender: true, store: target });
+      await analyzeTicker(symbol, null, { silent: true, skipRender: true, store: target, skipFund: true });
     }
     done++;
     // Rafraîchit l'affichage par paliers (pas à chaque ticker) pour ne pas
