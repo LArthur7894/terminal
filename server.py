@@ -47,6 +47,66 @@ SCREENER_ALLOWED = {
 }
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
 
+# Endpoint fondamental Yahoo (quoteSummary). Nécessite cookie + crumb (voir _get_yahoo_crumb).
+FUND_URL = ("https://query1.finance.yahoo.com/v10/finance/quoteSummary/{sym}"
+            "?modules=summaryDetail,financialData,defaultKeyStatistics,price&crumb={crumb}")
+
+
+def _pick(d, key):
+    """Extrait une valeur numérique d'un champ Yahoo : nombre brut, objet {raw,...} ou absent."""
+    if not isinstance(d, dict):
+        return None
+    v = d.get(key)
+    if isinstance(v, dict):
+        v = v.get("raw")
+    if v is None or v == "":
+        return None
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    return f if f == f and f not in (float("inf"), float("-inf")) else None  # écarte NaN/inf
+
+
+def _normalize_fundamentals(sym, node):
+    """Aplati quoteSummary.result[0] en un dict plat. Champs absents → None."""
+    summary = node.get("summaryDetail") or {}
+    stats = node.get("defaultKeyStatistics") or {}
+    fin = node.get("financialData") or {}
+    price = node.get("price") or {}
+
+    rec = fin.get("recommendationKey")
+    long_name = price.get("longName") or price.get("shortName")
+
+    return {
+        "symbol": sym,
+        "currency": price.get("currency") or summary.get("currency"),
+        "longName": long_name if isinstance(long_name, str) else None,
+        "marketCap": _pick(price, "marketCap") or _pick(summary, "marketCap"),
+        "trailingPE": _pick(summary, "trailingPE"),
+        "forwardPE": _pick(summary, "forwardPE") or _pick(stats, "forwardPE"),
+        "pegRatio": _pick(stats, "pegRatio"),
+        "priceToBook": _pick(stats, "priceToBook"),
+        "enterpriseToEbitda": _pick(stats, "enterpriseToEbitda"),
+        "priceToSales": _pick(summary, "priceToSalesTrailing12Months"),
+        "trailingEps": _pick(stats, "trailingEps"),
+        "forwardEps": _pick(stats, "forwardEps"),
+        "profitMargins": _pick(fin, "profitMargins") or _pick(stats, "profitMargins"),
+        "operatingMargins": _pick(fin, "operatingMargins"),
+        "grossMargins": _pick(fin, "grossMargins"),
+        "returnOnEquity": _pick(fin, "returnOnEquity"),
+        "returnOnAssets": _pick(fin, "returnOnAssets"),
+        "revenueGrowth": _pick(fin, "revenueGrowth"),
+        "earningsGrowth": _pick(fin, "earningsGrowth"),
+        "debtToEquity": _pick(fin, "debtToEquity"),
+        "currentRatio": _pick(fin, "currentRatio"),
+        "quickRatio": _pick(fin, "quickRatio"),
+        "dividendYield": _pick(summary, "dividendYield"),
+        "payoutRatio": _pick(summary, "payoutRatio"),
+        "recommendationKey": rec if isinstance(rec, str) else None,
+        "targetMeanPrice": _pick(fin, "targetMeanPrice"),
+    }
+
 
 class Handler(SimpleHTTPRequestHandler):
     """Fichiers statiques + routes /api/history, /api/search, /api/news, /api/screener."""
