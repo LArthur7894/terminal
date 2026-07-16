@@ -808,7 +808,10 @@ input::placeholder { color: var(--text-dim); }
     <section class="panel" id="panel-marche" role="tabpanel" aria-labelledby="tab-marche" hidden>
       <div class="panel-head">
         <h1>Meilleures actions du marché <span class="muted">/ grandes capitalisations mondiales, classées par score technique</span></h1>
-        <button class="btn btn-accent" id="btn-market-scan">Scanner le marché</button>
+        <span class="market-actions">
+          <button class="btn btn-accent" id="btn-market-scan">Scanner le marché</button>
+          <button class="btn btn-ghost" id="btn-market-enrich">★ Enrichir le top (fondamental)</button>
+        </span>
       </div>
       <p class="hint" id="market-status">Aucun scan encore lancé.</p>
       <div class="weight-control">
@@ -827,6 +830,8 @@ input::placeholder { color: var(--text-dim); }
               <th>Entreprise</th>
               <th class="num">Cours</th>
               <th class="num">Score</th>
+              <th class="num">Fonda</th>
+              <th class="num">Global</th>
               <th>Signal</th>
               <th class="num">Perf. 1 an</th>
               <th class="actions-col">Actions</th>
@@ -2909,28 +2914,34 @@ function updateMarketStatusText() {
 
 // Reconstruit uniquement le tableau de classement (n'écrase pas le texte de statut) —
 // utilisé pour les rafraîchissements en cours de scan.
+// Score de classement : global si le fondamental est présent (enrichi), sinon technique.
+function rankScore(entry) { return entry.fundScore ? computeGlobalScore(entry) : entry.score; }
+
 function renderMarketTable() {
   const tbody = document.getElementById("market-body");
   const ranked = marketCandidates
     .map(m => ({ ...m, entry: cache[m.symbol] || marketCache[m.symbol] }))
     .filter(m => m.entry)
-    .sort((a, b) => b.entry.score - a.entry.score)
+    .sort((a, b) => rankScore(b.entry) - rankScore(a.entry))
     .slice(0, 30);
 
   tbody.innerHTML = "";
   if (ranked.length === 0) {
-    tbody.innerHTML = `<tr><td colspan="8" class="na">Lancez un scan pour voir les meilleures opportunités du marché.</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="10" class="na">Lancez un scan pour voir les meilleures opportunités du marché.</td></tr>`;
     return;
   }
 
   ranked.forEach((m, i) => {
     const tr = document.createElement("tr");
+    const fs = m.entry.fundScore;
     tr.innerHTML = `
       <td class="na">#${i + 1}</td>
       <td><span class="cell-ticker">${esc(m.symbol)}</span></td>
       <td>${esc(m.name)}</td>
       <td class="num">${fnum(m.entry.ind.price)}</td>
       <td class="num">${m.entry.score}/100</td>
+      <td class="num">${fs ? fs.total : "—"}</td>
+      <td class="num">${fs ? computeGlobalScore(m.entry) : "—"}</td>
       <td><span class="signal signal-${m.entry.signal.toLowerCase()}">${m.entry.signal}</span></td>
       <td class="num ${pctClass(m.entry.ind.perf.y1)}">${fpct(m.entry.ind.perf.y1)}</td>
       <td class="actions-col"></td>`;
@@ -2958,6 +2969,45 @@ function renderMarketResults() {
 }
 
 document.getElementById("btn-market-scan").addEventListener("click", runMarketScan);
+
+// Enrichissement fondamental à la demande : récupère le fondamental des 30 titres du top
+// affiché (30 requêtes, concurrence douce), puis reclasse par score global.
+async function enrichMarketTop() {
+  const btn = document.getElementById("btn-market-enrich");
+  const status = document.getElementById("market-status");
+  const ranked = marketCandidates
+    .map(m => ({ ...m, entry: cache[m.symbol] || marketCache[m.symbol] }))
+    .filter(m => m.entry)
+    .sort((a, b) => rankScore(b.entry) - rankScore(a.entry))
+    .slice(0, 30);
+
+  if (ranked.length === 0) {
+    toast("Lancez d'abord un scan du marché.", "warn");
+    return;
+  }
+
+  btn.disabled = true;
+  let done = 0, touchedCache = false;
+  await runPool(ranked, async ({ symbol, entry }) => {
+    if (!entry.fundScore) { // pas déjà enrichi
+      let fund = null;
+      try { fund = await fetchFundamentals(symbol); } catch (e) { fund = null; }
+      entry.fund = fund;
+      entry.fundScore = computeFundScore(fund);
+      if (cache[symbol] === entry) touchedCache = true; // aussi en watchlist → persister
+    }
+    done++;
+    status.textContent = `Enrichissement fondamental… ${done}/${ranked.length}`;
+    if (done % 5 === 0 || done === ranked.length) renderMarketTable();
+  }, 5);
+
+  if (touchedCache) lsSet(LS.cache, cache);
+  btn.disabled = false;
+  renderMarketResults();
+  toast(`Top ${ranked.length} enrichi avec les données fondamentales.`, "success");
+}
+document.getElementById("btn-market-enrich").addEventListener("click", enrichMarketTop);
+
 renderMarketResults(); // affichage initial depuis le cache existant (watchlist déjà analysée, etc.)
 
 /* ============================= ONGLET 6 : ALLOCATION ============================= */
