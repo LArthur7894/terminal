@@ -441,7 +441,7 @@ input::placeholder { color: var(--text-dim); }
 /* --- Curseur de pondération du score global --- */
 .weight-control { margin: 4px 0 14px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg-panel); }
 .weight-control label { font-size: 12px; color: var(--text-dim); }
-.weight-control #weight-label { color: var(--text); font-family: var(--mono); }
+.weight-control .js-weight-label { color: var(--text); font-family: var(--mono); }
 .weight-control input[type="range"] { width: 100%; margin-top: 8px; accent-color: var(--amber); }
 .weight-ends { display: flex; justify-content: space-between; font-size: 10px; color: var(--text-dim); }
 
@@ -650,6 +650,14 @@ input::placeholder { color: var(--text-dim); }
         </form>
       </div>
 
+      <div class="weight-control">
+        <label>Pondération du score global :
+          <strong class="js-weight-label">50 % technique / 50 % fondamental</strong>
+        </label>
+        <input type="range" class="js-weight-slider" min="0" max="100" step="5" value="50" aria-label="Pondération technique / fondamental">
+        <span class="weight-ends"><span>100 % fonda</span><span>100 % tech</span></span>
+      </div>
+
       <div class="autopick-card" id="autopick-card">
         <div class="autopick-head">
           <h2>Meilleures opportunités <span class="muted">— sélection auto, rafraîchie toutes les heures</span></h2>
@@ -785,10 +793,10 @@ input::placeholder { color: var(--text-dim); }
         <button class="btn btn-ghost" id="btn-refresh-analysis">↻ Régénérer depuis le cache</button>
       </div>
       <div class="weight-control">
-        <label for="weight-slider">Pondération du score global :
-          <strong id="weight-label">50 % technique / 50 % fondamental</strong>
+        <label>Pondération du score global :
+          <strong class="js-weight-label">50 % technique / 50 % fondamental</strong>
         </label>
-        <input type="range" id="weight-slider" min="0" max="100" step="5" value="50">
+        <input type="range" class="js-weight-slider" min="0" max="100" step="5" value="50" aria-label="Pondération technique / fondamental">
         <span class="weight-ends"><span>100 % fonda</span><span>100 % tech</span></span>
       </div>
       <div id="analysis-container" class="analysis-container"></div>
@@ -801,6 +809,13 @@ input::placeholder { color: var(--text-dim); }
         <button class="btn btn-accent" id="btn-market-scan">Scanner le marché</button>
       </div>
       <p class="hint" id="market-status">Aucun scan encore lancé.</p>
+      <div class="weight-control">
+        <label>Pondération du score global :
+          <strong class="js-weight-label">50 % technique / 50 % fondamental</strong>
+        </label>
+        <input type="range" class="js-weight-slider" min="0" max="100" step="5" value="50" aria-label="Pondération technique / fondamental">
+        <span class="weight-ends"><span>100 % fonda</span><span>100 % tech</span></span>
+      </div>
       <div class="table-wrap">
         <table class="data-table" id="market-table">
           <thead>
@@ -2687,22 +2702,31 @@ document.getElementById("analysis-container").addEventListener("click", e => {
 
 document.getElementById("btn-refresh-analysis").addEventListener("click", renderAnalysis);
 
-// Curseur de pondération : la valeur du slider = part du TECHNIQUE (0..100).
-(function initWeightSlider() {
-  const slider = document.getElementById("weight-slider");
-  const label = document.getElementById("weight-label");
-  if (!slider || !label) return;
-  const paint = () => {
-    const tech = Math.round(weightTech * 100);
-    slider.value = tech;
-    label.textContent = `${tech} % technique / ${100 - tech} % fondamental`;
-  };
-  paint();
-  slider.addEventListener("input", () => {
-    weightTech = clamp01(Number(slider.value) / 100);
-    lsSet(LS.weightTech, weightTech);
-    label.textContent = `${Math.round(weightTech * 100)} % technique / ${Math.round((1 - weightTech) * 100)} % fondamental`;
-    renderAnalysis(); // recalcule tous les scores globaux affichés, sans requête réseau
+// Curseur de pondération partagé (Dashboard, Marché, Analyse) : la valeur = part du TECHNIQUE (0..100).
+// Tous les curseurs .js-weight-slider sont synchronisés sur weightTech.
+function paintWeightControls() {
+  const tech = Math.round(weightTech * 100);
+  document.querySelectorAll(".js-weight-slider").forEach(s => { s.value = tech; });
+  document.querySelectorAll(".js-weight-label").forEach(l => {
+    l.textContent = `${tech} % technique / ${100 - tech} % fondamental`;
+  });
+}
+
+function setWeightTech(v) {
+  weightTech = clamp01(v);
+  lsSet(LS.weightTech, weightTech);
+  paintWeightControls();
+  // Recalcule tous les scores globaux affichés, sans requête réseau.
+  renderWatchlist();
+  renderAutopick();
+  renderMarketTable();
+  renderAnalysis();
+}
+
+(function initWeightControls() {
+  paintWeightControls();
+  document.querySelectorAll(".js-weight-slider").forEach(slider => {
+    slider.addEventListener("input", () => setWeightTech(Number(slider.value) / 100));
   });
 })();
 
