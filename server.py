@@ -18,6 +18,7 @@
 
 import json
 import os
+import threading
 import urllib.request
 import urllib.error
 import urllib.parse
@@ -50,6 +51,44 @@ USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
 # Endpoint fondamental Yahoo (quoteSummary). Nécessite cookie + crumb (voir _get_yahoo_crumb).
 FUND_URL = ("https://query1.finance.yahoo.com/v10/finance/quoteSummary/{sym}"
             "?modules=summaryDetail,financialData,defaultKeyStatistics,price&crumb={crumb}")
+
+# Cookie + crumb Yahoo, partagés entre requêtes (ThreadingHTTPServer → protégés par un verrou).
+# quoteSummary refuse les appels sans ce couple depuis 2023. On les régénère à la demande
+# (premier appel, ou après une réponse 401/403 « Invalid Crumb »).
+_YAHOO_AUTH = {"cookie": None, "crumb": None}
+_YAHOO_AUTH_LOCK = threading.Lock()
+
+
+def _fetch_yahoo_auth():
+    """Récupère un cookie de session Yahoo puis un crumb valide pour ce cookie."""
+    # 1) Cookie : fc.yahoo.com renvoie souvent une erreur HTTP mais pose quand même le cookie.
+    cookie_req = urllib.request.Request("https://fc.yahoo.com", headers={"User-Agent": USER_AGENT})
+    try:
+        with urllib.request.urlopen(cookie_req, timeout=10) as resp:
+            set_cookies = resp.headers.get_all("Set-Cookie") or []
+    except urllib.error.HTTPError as e:
+        set_cookies = e.headers.get_all("Set-Cookie") or []
+    cookie_header = "; ".join(c.split(";", 1)[0] for c in set_cookies)
+    if not cookie_header:
+        raise RuntimeError("cookie Yahoo indisponible")
+
+    # 2) Crumb lié à ce cookie.
+    crumb_req = urllib.request.Request(
+        "https://query1.finance.yahoo.com/v1/test/getcrumb",
+        headers={"User-Agent": USER_AGENT, "Cookie": cookie_header})
+    with urllib.request.urlopen(crumb_req, timeout=10) as resp:
+        crumb = resp.read().decode("utf-8").strip()
+    if not crumb or "<" in crumb or len(crumb) > 40:
+        raise RuntimeError("crumb Yahoo invalide")
+    return cookie_header, crumb
+
+
+def _get_yahoo_crumb(force_refresh=False):
+    """Renvoie (cookie, crumb), en régénérant si absent ou si force_refresh."""
+    with _YAHOO_AUTH_LOCK:
+        if force_refresh or not _YAHOO_AUTH["crumb"]:
+            _YAHOO_AUTH["cookie"], _YAHOO_AUTH["crumb"] = _fetch_yahoo_auth()
+        return _YAHOO_AUTH["cookie"], _YAHOO_AUTH["crumb"]
 
 
 def _pick(d, key):
@@ -121,6 +160,8 @@ class Handler(SimpleHTTPRequestHandler):
             self.handle_news(parse_qs(parsed.query))
         elif parsed.path == "/api/screener":
             self.handle_screener(parse_qs(parsed.query))
+        elif parsed.path == "/api/fundamentals":
+            self.handle_fundamentals(parse_qs(parsed.query))
         else:
             super().do_GET()
 
@@ -312,6 +353,53 @@ class Handler(SimpleHTTPRequestHandler):
             return self.send_json({"results": results})
         except Exception:
             return self.send_json({"error": "format", "message": "Réponse de screener Yahoo inattendue."}, 502)
+
+    # --- route /api/fundamentals?symbol=XXX : données fondamentales (quoteSummary) ---
+    def handle_fundamentals(self, qs):
+        sym = (qs.get("symbol") or [""])[0].strip().upper()
+        if not sym or len(sym) > 15:
+            return self.send_json({"error": "symbol", "message": "Ticker manquant ou invalide."}, 400)
+
+        data = None
+        # 2 tentatives : la 2e force un crumb neuf si le premier a expiré (401/403).
+        for attempt in (0, 1):
+            try:
+                cookie, crumb = _get_yahoo_crumb(force_refresh=(attempt == 1))
+            except Exception:
+                return self.send_json(
+                    {"error": "network", "message": "Impossible d'authentifier auprès de Yahoo Finance."}, 502)
+
+            url = FUND_URL.format(sym=urllib.parse.quote(sym), crumb=urllib.parse.quote(crumb))
+            req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, "Cookie": cookie})
+            try:
+                with urllib.request.urlopen(req, timeout=15) as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
+                break
+            except urllib.error.HTTPError as e:
+                if e.code in (401, 403) and attempt == 0:
+                    continue  # crumb expiré → on régénère au tour suivant
+                if e.code == 404:
+                    return self.send_json(
+                        {"error": "symbol", "message": f"Ticker « {sym} » inconnu de Yahoo Finance."}, 404)
+                if e.code == 429:
+                    return self.send_json(
+                        {"error": "ratelimit",
+                         "message": "Yahoo Finance limite temporairement les requêtes. Réessayez dans une minute."}, 502)
+                return self.send_json(
+                    {"error": "http", "message": f"Yahoo Finance a répondu HTTP {e.code}."}, 502)
+            except Exception:
+                return self.send_json(
+                    {"error": "network", "message": "Impossible de joindre Yahoo Finance."}, 502)
+
+        try:
+            result = (data.get("quoteSummary", {}) or {}).get("result")
+            if not result:
+                return self.send_json(
+                    {"error": "symbol", "message": f"Aucune donnée fondamentale pour {sym}."}, 404)
+            return self.send_json(_normalize_fundamentals(sym, result[0]))
+        except Exception:
+            return self.send_json(
+                {"error": "format", "message": f"Réponse fondamentale Yahoo inattendue pour {sym}."}, 502)
 
     # Journal minimal (une ligne par requête API seulement)
     def log_message(self, fmt, *args):
