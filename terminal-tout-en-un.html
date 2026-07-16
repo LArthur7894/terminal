@@ -683,6 +683,8 @@ input::placeholder { color: var(--text-dim); }
               <th class="num">SMA 200</th>
               <th>Range 52 sem.</th>
               <th class="num">Score</th>
+              <th class="num">Fonda</th>
+              <th class="num">Global</th>
               <th>Signal</th>
               <th>MàJ</th>
               <th class="actions-col">Actions</th>
@@ -1810,13 +1812,13 @@ function renderWatchlist() {
   tbody.innerHTML = "";
 
   if (watchlist.length === 0) {
-    tbody.innerHTML = `<tr><td colspan="11" class="na">Watchlist vide — ajoutez un ticker ci-dessus (ex. AAPL, MSFT, MC.PA, TTE.PA).</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="13" class="na">Watchlist vide — ajoutez un ticker ci-dessus (ex. AAPL, MSFT, MC.PA, TTE.PA).</td></tr>`;
     return;
   }
 
   const filtered = watchlist.filter(matchesWatchlistFilter);
   if (filtered.length === 0) {
-    tbody.innerHTML = `<tr><td colspan="11" class="na">Aucun résultat pour « ${esc(watchlistFilterQuery)} ».</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="13" class="na">Aucun résultat pour « ${esc(watchlistFilterQuery)} ».</td></tr>`;
     return;
   }
 
@@ -1847,6 +1849,13 @@ function renderWatchlist() {
             <span>${score}</span>
           </span>
         </td>
+        <td class="num">${entry.fundScore ? entry.fundScore.total : "—"}</td>
+        <td class="num">
+          <span class="score-cell">
+            <span class="score-bar"><span class="score-fill" style="width:${computeGlobalScore(entry)}%"></span></span>
+            <span>${computeGlobalScore(entry)}</span>
+          </span>
+        </td>
         <td><span class="signal signal-${signal.toLowerCase()}">${signal}</span></td>
         <td class="na">${fdate(entry.updated)}</td>
         <td class="actions-col"></td>`;
@@ -1855,7 +1864,7 @@ function renderWatchlist() {
         <td>${tickerCellHtml(ticker)}</td>
         <td class="num na">—</td><td class="num na">—</td><td class="num na">—</td>
         <td class="num na">—</td><td class="num na">—</td><td class="na">—</td>
-        <td class="num na">—</td><td class="na">—</td><td class="na">jamais</td>
+        <td class="num na">—</td><td class="num na">—</td><td class="num na">—</td><td class="na">—</td><td class="na">jamais</td>
         <td class="actions-col"></td>`;
     }
 
@@ -1968,7 +1977,7 @@ function computeTopPicks(limit = Infinity) {
   return watchlist
     .map(t => ({ ticker: t, entry: cache[t] }))
     .filter(x => x.entry && x.entry.signal === "Achat")
-    .sort((a, b) => b.entry.score - a.entry.score)
+    .sort((a, b) => computeGlobalScore(b.entry) - computeGlobalScore(a.entry))
     .slice(0, limit);
 }
 
