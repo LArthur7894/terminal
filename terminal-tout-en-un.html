@@ -1121,6 +1121,60 @@ let lastAllocationPlan = null;               // dernière répartition proposée
 // ajouté à la watchlist est "promu" vers le cache persistant (voir addTickerToWatchlist).
 let marketCache = {};
 
+/* ============================= PERSISTANCE INDEXEDDB (cache marché) ============================= */
+
+function idbOpen() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open("terminal-boursier", 1);
+    req.onupgradeneeded = () => { req.result.createObjectStore("kv"); };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+async function idbGet(key) {
+  const db = await idbOpen();
+  return new Promise((resolve, reject) => {
+    const r = db.transaction("kv", "readonly").objectStore("kv").get(key);
+    r.onsuccess = () => resolve(r.result);
+    r.onerror = () => reject(r.error);
+  });
+}
+async function idbSet(key, val) {
+  const db = await idbOpen();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction("kv", "readwrite");
+    tx.objectStore("kv").put(val, key);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+// Sauvegarde best-effort du cache marché (fire-and-forget).
+function saveMarketCache() { idbSet("marketCache", marketCache).catch(() => {}); }
+
+// Chargement au démarrage : élague > 7 jours, migre, fusionne, re-render.
+async function loadMarketCache() {
+  let saved;
+  try { saved = await idbGet("marketCache"); } catch { return; }
+  if (!saved || typeof saved !== "object") return;
+  const now = Date.now(), WEEK = 7 * 24 * 3600 * 1000;
+  for (const [sym, entry] of Object.entries(saved)) {
+    if (!entry || !entry.updated) continue;
+    if (now - new Date(entry.updated).getTime() > WEEK) continue;
+    if (marketCache[sym]) continue;
+    let e = entry;
+    if (e.hist && (!e.ind || !e.ind.perf || !e.ind.bollinger || !e.ind.stochastic)) {
+      const ind = computeIndicators(e.hist), score = computeScore(ind);
+      e = { ...e, ind, score, signal: signalFromScore(score) };
+    }
+    if (e.fund === undefined) e.fund = null;
+    e.fundScore = computeFundScore(e.fund);
+    marketCache[sym] = e;
+  }
+  renderMarketResults();
+  renderAll();
+}
+
 // Identifiants uniques pour les positions, même en cas de créations multiples
 // dans la même milliseconde (ex. application d'une répartition sur plusieurs lignes).
 let nextPositionId = Date.now();
@@ -3078,6 +3132,7 @@ async function runMarketScan() {
   // aussi être dans la watchlist / les picks auto, qu'on n'a pas rafraîchis pendant
   // la boucle (skipRender) pour des raisons de performance.
   renderAll();
+  saveMarketCache();
   toast(`Scan du marché terminé (${total} valeurs passées en revue).`, "success");
 }
 
@@ -3191,11 +3246,13 @@ async function enrichMarketTop() {
   if (touchedCache) lsSet(LS.cache, cache);
   btn.disabled = false;
   renderMarketResults();
+  saveMarketCache();
   toast(`Top ${ranked.length} enrichi avec les données fondamentales.`, "success");
 }
 document.getElementById("btn-market-enrich").addEventListener("click", enrichMarketTop);
 
 renderMarketResults(); // affichage initial depuis le cache existant (watchlist déjà analysée, etc.)
+loadMarketCache(); // repeuple le cache marché depuis IndexedDB (best-effort)
 
 /* ============================= FILTRES & TRI — CÂBLAGE ============================= */
 
