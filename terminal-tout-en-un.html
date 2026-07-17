@@ -1024,6 +1024,7 @@ const LS = {
   tickerNames: "term_ticker_names",
   weightTech: "term_weight_tech", // part du score technique dans le score global (0..1)
   filters: "term_filters", // critères de filtre par tableau {wl:{...}, mk:{...}}, par profil
+  alerts: "term_alerts", // règles d'alerte par profil
 };
 
 /* ============================= ÉTAT GLOBAL ============================= */
@@ -1101,6 +1102,59 @@ function applyPurchase(ticker, price, amount) {
   } else {
     positions.push({ id: newPositionId(), ticker, qty: qtyBought, pru: price });
   }
+}
+
+/* ============================= ALERTES ============================= */
+
+let alerts = lsGet(LS.alerts, []);          // règles persistées par profil
+if (!Array.isArray(alerts)) alerts = [];
+let alertLog = [];                          // journal de session : [{ticker, label, at}]
+let nextAlertId = Date.now();
+function newAlertId() { return nextAlertId++; }
+function saveAlerts() { lsSet(LS.alerts, alerts); }
+
+// Libellé lisible d'une règle.
+function alertLabel(a) {
+  if (a.type === "price")  return `Prix ${a.direction === "above" ? "≥" : "≤"} ${a.value}`;
+  if (a.type === "global") return `Score global ${a.direction === "above" ? "≥" : "≤"} ${a.value}`;
+  if (a.type === "rsi")    return a.direction === "oversold" ? `RSI ≤ ${a.value} (survente)` : `RSI ≥ ${a.value} (surachat)`;
+  if (a.type === "change") return `Variation du jour ≥ ${a.value} %`;
+  return "—";
+}
+
+// Évalue toutes les alertes actives sur les données en cache. Hystérésis via triggeredAt.
+function checkAlerts() {
+  let changed = false;
+  for (const a of alerts) {
+    if (!a.enabled) continue;
+    const e = cache[a.ticker];
+    if (!e || !e.ind) { if (a.triggeredAt) { a.triggeredAt = null; changed = true; } continue; }
+    let cur = null;
+    if (a.type === "price")  cur = e.ind.price;
+    else if (a.type === "global") cur = (e.score != null ? computeGlobalScore(e) : null);
+    else if (a.type === "rsi")    cur = e.ind.rsi;
+    else if (a.type === "change") cur = e.ind.changePct;
+
+    let cond = false;
+    if (cur != null && isFinite(cur)) {
+      if (a.type === "price" || a.type === "global") cond = a.direction === "above" ? cur >= a.value : cur <= a.value;
+      else if (a.type === "rsi") cond = a.direction === "oversold" ? cur <= a.value : cur >= a.value;
+      else if (a.type === "change") cond = Math.abs(cur) >= a.value;
+    }
+
+    if (cond && !a.triggeredAt) {
+      a.triggeredAt = new Date().toISOString();
+      changed = true;
+      const label = `${a.ticker} — ${alertLabel(a)}`;
+      alertLog.unshift({ ticker: a.ticker, label: alertLabel(a), at: a.triggeredAt });
+      if (alertLog.length > 30) alertLog.pop();
+      toast(`🔔 ${label}`, "warn");
+    } else if (!cond && a.triggeredAt) {
+      a.triggeredAt = null; changed = true;
+    }
+  }
+  if (changed) saveAlerts();
+  if (typeof renderAlerts === "function") renderAlerts();
 }
 
 /* ============================= HELPERS localStorage ============================= */
@@ -3302,6 +3356,7 @@ function renderAll() {
   renderPositions();
   renderAnalysis();
   renderMarketResults();
+  checkAlerts();
 }
 
 /* ============================= INITIALISATION ============================= */
