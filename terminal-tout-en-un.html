@@ -2979,7 +2979,7 @@ async function enrichMarketTop() {
     .map(m => ({ ...m, entry: cache[m.symbol] || marketCache[m.symbol] }))
     .filter(m => m.entry)
     .sort((a, b) => rankScore(b.entry) - rankScore(a.entry))
-    .slice(0, 30);
+    .slice(0, 100); // enrichit un vivier large ; l'affichage (top 30) est reclassé par score global
 
   if (ranked.length === 0) {
     toast("Lancez d'abord un scan du marché.", "warn");
