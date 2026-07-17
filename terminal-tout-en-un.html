@@ -3479,6 +3479,60 @@ function exportData() {
 }
 document.getElementById("btn-export").addEventListener("click", exportData);
 
+document.getElementById("btn-import").addEventListener("click", () => document.getElementById("import-file").click());
+document.getElementById("import-file").addEventListener("change", e => {
+  const file = e.target.files && e.target.files[0];
+  if (file) importData(file);
+  e.target.value = ""; // permet de ré-importer le même fichier
+});
+
+function importData(file) {
+  const reader = new FileReader();
+  reader.onload = () => {
+    let parsed;
+    try { parsed = JSON.parse(reader.result); }
+    catch { return toast("Fichier illisible (JSON invalide).", "error"); }
+    if (!parsed || parsed.app !== "terminal-boursier" || !parsed.data) {
+      return toast("Ce fichier n'est pas un export du terminal.", "error");
+    }
+    if (!window.confirm("Fusionner ces données avec votre profil actuel ?")) return;
+
+    const d = parsed.data;
+    let addedT = 0, addedP = 0, addedA = 0;
+
+    // Watchlist : union.
+    for (const t of (d.watchlist || [])) {
+      if (!watchlist.includes(t)) { watchlist.push(t); addedT++; }
+    }
+    // Noms : l'actuel prime, l'import comble les manques.
+    tickerNames = { ...(d.tickerNames || {}), ...tickerNames };
+    // Positions : fusion par ticker (PRU moyen pondéré), via applyPurchase.
+    for (const p of (d.positions || [])) {
+      if (!p || !p.ticker || !(p.pru > 0) || !(p.qty > 0)) continue;
+      applyPurchase(p.ticker, p.pru, p.qty * p.pru); addedP++;
+    }
+    // Alertes : union en dédupliquant (ticker+type+direction+value).
+    const sig = a => `${a.ticker}|${a.type}|${a.direction}|${a.value}`;
+    const existing = new Set(alerts.map(sig));
+    for (const a of (d.alerts || [])) {
+      if (!a || !a.ticker || existing.has(sig(a))) continue;
+      alerts.push({ id: newAlertId(), ticker: a.ticker, type: a.type, direction: a.direction, value: a.value, enabled: a.enabled !== false, triggeredAt: null });
+      existing.add(sig(a)); addedA++;
+    }
+    // weightTech et filters : inchangés (préférences du profil courant).
+
+    lsSet(LS.watchlist, watchlist);
+    lsSet(LS.positions, positions);
+    lsSet(LS.tickerNames, tickerNames);
+    saveAlerts();
+    renderAll();
+    if (typeof renderAlerts === "function") renderAlerts();
+    toast(`Import fusionné : +${addedT} tickers, +${addedP} positions, +${addedA} alertes.`, "success");
+  };
+  reader.onerror = () => toast("Erreur de lecture du fichier.", "error");
+  reader.readAsText(file);
+}
+
 document.getElementById("btn-settings-close").addEventListener("click", () => settingsDialog.close());
 
 document.getElementById("form-settings").addEventListener("submit", () => {
