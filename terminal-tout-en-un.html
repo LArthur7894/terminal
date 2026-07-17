@@ -1001,6 +1001,7 @@ const LS = {
   marketScanLast: "term_market_scan_last",
   tickerNames: "term_ticker_names",
   weightTech: "term_weight_tech", // part du score technique dans le score global (0..1)
+  filters: "term_filters", // critères de filtre par tableau {wl:{...}, mk:{...}}, par profil
 };
 
 /* ============================= ÉTAT GLOBAL ============================= */
@@ -1018,6 +1019,16 @@ let weightTech = clamp01(Number(lsGet(LS.weightTech, 0.5)));
 // FONDAMENTAL plus bas) car la boucle de migration ci-dessous appelle computeFundScore
 // au chargement : une const déclarée plus tard serait dans sa zone morte temporelle (TDZ).
 const FUND_PILLAR_WEIGHTS = { valuation: 0.35, profitability: 0.30, growth: 0.20, health: 0.15 };
+
+// Filtres numériques par tableau (wl = watchlist, mk = marché). Valeur absente = critère inactif.
+// Persistés par profil. Le tri (sortState) est volontairement en mémoire de session seulement.
+let filters = lsGet(LS.filters, { wl: {}, mk: {} });
+if (!filters || typeof filters !== "object") filters = { wl: {}, mk: {} };
+if (!filters.wl) filters.wl = {};
+if (!filters.mk) filters.mk = {};
+let sortState = { wl: { col: null, dir: 1 }, mk: { col: null, dir: 1 } };
+
+function saveFilters() { lsSet(LS.filters, filters); }
 
 // Migration : les entrées mises en cache avant l'ajout du MACD / de la volatilité /
 // des performances multi-horizons n'ont pas ces champs sur `ind`. On les recalcule
@@ -1810,6 +1821,59 @@ function matchesWatchlistFilter(ticker) {
   const q = watchlistFilterQuery.toLowerCase();
   const name = (tickerNames[ticker] || "").toLowerCase();
   return ticker.toLowerCase().includes(q) || name.includes(q);
+}
+
+/* ============================= FILTRES & TRI ============================= */
+
+// Extracteurs de valeur par colonne : (entry) -> nombre ou null (null = trié en bas / non filtrable).
+const COLUMN_VALUE = {
+  price:  e => e.ind ? e.ind.price : null,
+  change: e => e.ind ? e.ind.changePct : null,
+  rsi:    e => e.ind ? e.ind.rsi : null,
+  score:  e => (e.score != null ? e.score : null),
+  fonda:  e => (e.fundScore ? e.fundScore.total : null),
+  global: e => (e.score != null ? computeGlobalScore(e) : null),
+  perf1y: e => (e.ind && e.ind.perf ? e.ind.perf.y1 : null),
+};
+
+// Trie une liste selon COLUMN_VALUE[state.col] ; nulls toujours en bas quel que soit le sens.
+function sortByColumn(list, getEntry, state) {
+  if (!state.col || !COLUMN_VALUE[state.col]) return list;
+  const val = COLUMN_VALUE[state.col];
+  return [...list].sort((a, b) => {
+    const va = val(getEntry(a)), vb = val(getEntry(b));
+    if (va == null && vb == null) return 0;
+    if (va == null) return 1;
+    if (vb == null) return -1;
+    return (va - vb) * state.dir;
+  });
+}
+
+// Un filtre fondamental (PER, dividende, fonda, global) est-il actif ?
+function hasActiveFundFilter(f) {
+  return f.globalMin != null || f.fondaMin != null || f.perMax != null || f.divMin != null;
+}
+
+// Prédicat de filtre. Un critère fondamental actif rejette une entrée sans la donnée.
+function passesFilters(entry, f) {
+  if (!entry) return false;
+  if (f.globalMin != null) {
+    const g = entry.score != null ? computeGlobalScore(entry) : null;
+    if (g == null || g < f.globalMin) return false;
+  }
+  if (f.fondaMin != null) {
+    const v = entry.fundScore ? entry.fundScore.total : null;
+    if (v == null || v < f.fondaMin) return false;
+  }
+  if (f.perMax != null) {
+    const v = entry.fund ? entry.fund.trailingPE : null;
+    if (v == null || v > f.perMax) return false;
+  }
+  if (f.divMin != null) {
+    const v = entry.fund ? entry.fund.dividendYield : null; // fraction
+    if (v == null || v * 100 < f.divMin) return false;       // divMin exprimé en %
+  }
+  return true;
 }
 
 function renderWatchlist() {
