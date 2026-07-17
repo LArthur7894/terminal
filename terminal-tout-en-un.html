@@ -1879,15 +1879,21 @@ function passesFilters(entry, f) {
 function renderWatchlist() {
   const tbody = document.getElementById("watchlist-body");
   tbody.innerHTML = "";
+  if (typeof paintSortIndicators === "function") paintSortIndicators("watchlist-table", "wl");
 
   if (watchlist.length === 0) {
     tbody.innerHTML = `<tr><td colspan="13" class="na">Watchlist vide — ajoutez un ticker ci-dessus (ex. AAPL, MSFT, MC.PA, TTE.PA).</td></tr>`;
     return;
   }
 
-  const filtered = watchlist.filter(matchesWatchlistFilter);
+  let filtered = watchlist.filter(matchesWatchlistFilter);
+  // Filtre numérique : un titre non analysé (sans cache) est masqué si un filtre fondamental est actif.
+  filtered = filtered.filter(t => cache[t] ? passesFilters(cache[t], filters.wl) : !hasActiveFundFilter(filters.wl));
+  // Tri par colonne (si actif).
+  filtered = sortByColumn(filtered, t => cache[t] || {}, sortState.wl);
   if (filtered.length === 0) {
-    tbody.innerHTML = `<tr><td colspan="13" class="na">Aucun résultat pour « ${esc(watchlistFilterQuery)} ».</td></tr>`;
+    const why = watchlistFilterQuery ? `pour « ${esc(watchlistFilterQuery)} »` : "avec les filtres actifs";
+    tbody.innerHTML = `<tr><td colspan="13" class="na">Aucun résultat ${why}.</td></tr>`;
     return;
   }
 
@@ -2983,15 +2989,19 @@ function rankScore(entry) { return entry.fundScore ? computeGlobalScore(entry) :
 
 function renderMarketTable() {
   const tbody = document.getElementById("market-body");
-  const ranked = marketCandidates
+  let list = marketCandidates
     .map(m => ({ ...m, entry: cache[m.symbol] || marketCache[m.symbol] }))
     .filter(m => m.entry)
-    .sort((a, b) => rankScore(b.entry) - rankScore(a.entry))
-    .slice(0, 30);
+    .filter(m => passesFilters(m.entry, filters.mk));
+  list = sortState.mk.col
+    ? sortByColumn(list, m => m.entry, sortState.mk)
+    : list.sort((a, b) => rankScore(b.entry) - rankScore(a.entry));
+  const ranked = list.slice(0, 30);
 
   tbody.innerHTML = "";
+  if (typeof paintSortIndicators === "function") paintSortIndicators("market-table", "mk");
   if (ranked.length === 0) {
-    tbody.innerHTML = `<tr><td colspan="10" class="na">Lancez un scan pour voir les meilleures opportunités du marché.</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="10" class="na">Aucune valeur ne correspond (lancez un scan, ou assouplissez les filtres).</td></tr>`;
     return;
   }
 
