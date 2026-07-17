@@ -319,6 +319,12 @@ input::placeholder { color: var(--text-dim); }
 .cell-company { font-size: 11px; color: var(--text-dim); font-weight: 400; white-space: normal; }
 
 .watchlist-filter-row { margin-bottom: 10px; }
+.filter-panel { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 0 0 10px; font-size: 12px; color: var(--text-dim); }
+.filter-panel .filter-label { text-transform: uppercase; letter-spacing: 1px; }
+.filter-panel label { display: inline-flex; align-items: center; gap: 4px; color: var(--text); }
+.filter-panel input[type="number"] { width: 64px; }
+th.sortable { cursor: pointer; user-select: none; }
+th.sortable:hover { color: var(--amber); }
 #watchlist-filter { width: 100%; max-width: 360px; }
 .stale-badge {
   font-size: 10px; color: var(--text-dim);
@@ -670,21 +676,29 @@ input::placeholder { color: var(--text-dim); }
         <label class="sr-only" for="watchlist-filter">Filtrer la watchlist</label>
         <input type="text" id="watchlist-filter" placeholder="🔎 Filtrer par ticker ou nom d'entreprise…" autocomplete="off">
       </div>
+      <div class="filter-panel" data-scope="wl">
+        <span class="filter-label">Filtres :</span>
+        <label>Global ≥ <input type="number" class="js-filter" data-scope="wl" data-key="globalMin" min="0" max="100" step="1"></label>
+        <label>Fonda ≥ <input type="number" class="js-filter" data-scope="wl" data-key="fondaMin" min="0" max="100" step="1"></label>
+        <label>PER ≤ <input type="number" class="js-filter" data-scope="wl" data-key="perMax" min="0" step="0.5"></label>
+        <label>Div. ≥ <input type="number" class="js-filter" data-scope="wl" data-key="divMin" min="0" step="0.1"> %</label>
+        <button type="button" class="btn btn-small btn-ghost js-filter-reset" data-scope="wl">Réinitialiser</button>
+      </div>
 
       <div class="table-wrap">
         <table class="data-table" id="watchlist-table">
           <thead>
             <tr>
               <th>Ticker</th>
-              <th class="num">Cours</th>
-              <th class="num">Var. %</th>
-              <th class="num">RSI 14</th>
+              <th class="num" data-sort="price">Cours</th>
+              <th class="num" data-sort="change">Var. %</th>
+              <th class="num" data-sort="rsi">RSI 14</th>
               <th class="num">SMA 50</th>
               <th class="num">SMA 200</th>
               <th>Range 52 sem.</th>
-              <th class="num">Score</th>
-              <th class="num">Fonda</th>
-              <th class="num">Global</th>
+              <th class="num" data-sort="score">Score</th>
+              <th class="num" data-sort="fonda">Fonda</th>
+              <th class="num" data-sort="global">Global</th>
               <th>Signal</th>
               <th>MàJ</th>
               <th class="actions-col">Actions</th>
@@ -821,6 +835,14 @@ input::placeholder { color: var(--text-dim); }
         <input type="range" class="js-weight-slider" min="0" max="100" step="5" value="50" aria-label="Pondération technique / fondamental">
         <span class="weight-ends"><span>100 % fonda</span><span>100 % tech</span></span>
       </div>
+      <div class="filter-panel" data-scope="mk">
+        <span class="filter-label">Filtres :</span>
+        <label>Global ≥ <input type="number" class="js-filter" data-scope="mk" data-key="globalMin" min="0" max="100" step="1"></label>
+        <label>Fonda ≥ <input type="number" class="js-filter" data-scope="mk" data-key="fondaMin" min="0" max="100" step="1"></label>
+        <label>PER ≤ <input type="number" class="js-filter" data-scope="mk" data-key="perMax" min="0" step="0.5"></label>
+        <label>Div. ≥ <input type="number" class="js-filter" data-scope="mk" data-key="divMin" min="0" step="0.1"> %</label>
+        <button type="button" class="btn btn-small btn-ghost js-filter-reset" data-scope="mk">Réinitialiser</button>
+      </div>
       <div class="table-wrap">
         <table class="data-table" id="market-table">
           <thead>
@@ -828,17 +850,17 @@ input::placeholder { color: var(--text-dim); }
               <th>Rang</th>
               <th>Ticker</th>
               <th>Entreprise</th>
-              <th class="num">Cours</th>
-              <th class="num">Score</th>
-              <th class="num">Fonda</th>
-              <th class="num">Global</th>
+              <th class="num" data-sort="price">Cours</th>
+              <th class="num" data-sort="score">Score</th>
+              <th class="num" data-sort="fonda">Fonda</th>
+              <th class="num" data-sort="global">Global</th>
               <th>Signal</th>
-              <th class="num">Perf. 1 an</th>
+              <th class="num" data-sort="perf1y">Perf. 1 an</th>
               <th class="actions-col">Actions</th>
             </tr>
           </thead>
           <tbody id="market-body">
-            <tr><td colspan="8" class="na">Lancez un scan pour voir les meilleures opportunités du marché.</td></tr>
+            <tr><td colspan="10" class="na">Lancez un scan pour voir les meilleures opportunités du marché.</td></tr>
           </tbody>
         </table>
       </div>
@@ -3083,6 +3105,59 @@ async function enrichMarketTop() {
 document.getElementById("btn-market-enrich").addEventListener("click", enrichMarketTop);
 
 renderMarketResults(); // affichage initial depuis le cache existant (watchlist déjà analysée, etc.)
+
+/* ============================= FILTRES & TRI — CÂBLAGE ============================= */
+
+// Met à jour les indicateurs ▲/▼ sur les en-têtes triables d'un tableau.
+function paintSortIndicators(tableId, scope) {
+  const st = sortState[scope];
+  document.querySelectorAll(`#${tableId} thead th[data-sort]`).forEach(th => {
+    if (!th.dataset.label) th.dataset.label = th.textContent;
+    const arrow = th.dataset.sort === st.col ? (st.dir === 1 ? " ▲" : " ▼") : "";
+    th.textContent = th.dataset.label + arrow;
+  });
+}
+
+// Rend les en-têtes [data-sort] cliquables : 1er clic = desc, re-clic = inverse.
+function wireSortHeaders(tableId, scope, renderFn) {
+  document.querySelectorAll(`#${tableId} thead th[data-sort]`).forEach(th => {
+    th.classList.add("sortable");
+    th.addEventListener("click", () => {
+      const col = th.dataset.sort, st = sortState[scope];
+      if (st.col === col) st.dir = -st.dir; else { st.col = col; st.dir = -1; }
+      renderFn();
+    });
+  });
+}
+
+(function initFiltersAndSort() {
+  // Pré-remplissage des filtres depuis l'état (persisté par profil).
+  document.querySelectorAll(".js-filter").forEach(inp => {
+    const { scope, key } = inp.dataset;
+    if (filters[scope] && filters[scope][key] != null) inp.value = filters[scope][key];
+    inp.addEventListener("input", () => {
+      const raw = inp.value;
+      const v = raw === "" ? null : Number(raw);
+      filters[scope][key] = (v == null || isNaN(v)) ? null : v;
+      saveFilters();
+      scope === "wl" ? renderWatchlist() : renderMarketTable();
+    });
+  });
+  document.querySelectorAll(".js-filter-reset").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const scope = btn.dataset.scope;
+      filters[scope] = {};
+      saveFilters();
+      document.querySelectorAll(`.js-filter[data-scope="${scope}"]`).forEach(i => { i.value = ""; });
+      scope === "wl" ? renderWatchlist() : renderMarketTable();
+    });
+  });
+  wireSortHeaders("watchlist-table", "wl", renderWatchlist);
+  wireSortHeaders("market-table", "mk", renderMarketTable);
+  // Applique un éventuel filtre déjà persisté au premier affichage.
+  renderWatchlist();
+  renderMarketTable();
+})();
 
 /* ============================= ONGLET 6 : ALLOCATION ============================= */
 
