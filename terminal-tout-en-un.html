@@ -325,6 +325,16 @@ input::placeholder { color: var(--text-dim); }
 .filter-panel input[type="number"] { width: 64px; }
 th.sortable { cursor: pointer; user-select: none; }
 th.sortable:hover { color: var(--amber); }
+.alert-form { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 10px; }
+.alert-form select, .alert-form input[type="number"] { padding: 4px 6px; }
+.alerts-list { display: grid; gap: 6px; margin-bottom: 16px; }
+.alert-item { display: flex; align-items: center; gap: 12px; padding: 8px 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg-panel); font-size: 13px; }
+.alert-item.triggered { border-color: var(--amber); }
+.alert-item .alert-ticker { font-weight: 700; font-family: var(--mono); min-width: 70px; }
+.alert-item .alert-cond { flex: 1; }
+.alert-item .alert-state { color: var(--text-dim); }
+.alerts-log-title { font-size: 13px; text-transform: uppercase; letter-spacing: 1px; color: var(--text-dim); }
+.alert-log-row { font-size: 12px; padding: 3px 0; }
 #watchlist-filter { width: 100%; max-width: 360px; }
 .stale-badge {
   font-size: 10px; color: var(--text-dim);
@@ -634,6 +644,7 @@ th.sortable:hover { color: var(--amber); }
       <button class="tab" role="tab" aria-selected="false" aria-controls="panel-analyse"   id="tab-analyse"   data-tab="analyse">F4 · ANALYSE</button>
       <button class="tab" role="tab" aria-selected="false" aria-controls="panel-marche" id="tab-marche" data-tab="marche">F5 · MARCHÉ</button>
       <button class="tab" role="tab" aria-selected="false" aria-controls="panel-allocation" id="tab-allocation" data-tab="allocation">F6 · ALLOCATION</button>
+      <button class="tab" role="tab" aria-selected="false" aria-controls="panel-alerts" id="tab-alerts" data-tab="alerts">F7 · ALERTES</button>
     </nav>
   </header>
 
@@ -896,6 +907,29 @@ th.sortable:hover { color: var(--amber); }
           <p class="analysis-empty">Entrez un montant et cliquez sur « Répartir » pour voir une proposition d'allocation.</p>
         </div>
       </div>
+    </section>
+
+    <!-- ======================= ONGLET 7 : ALERTES ======================= -->
+    <section class="panel" id="panel-alerts" role="tabpanel" aria-labelledby="tab-alerts" hidden>
+      <div class="panel-head">
+        <h1>Alertes <span class="muted">/ prévenues à l'ouverture et à chaque analyse</span></h1>
+      </div>
+      <form id="form-alert" class="alert-form">
+        <select id="alert-ticker" aria-label="Ticker"></select>
+        <select id="alert-type" aria-label="Type d'alerte">
+          <option value="price">Prix</option>
+          <option value="global">Score global</option>
+          <option value="rsi">RSI</option>
+          <option value="change">Variation du jour</option>
+        </select>
+        <select id="alert-direction" aria-label="Condition"></select>
+        <input type="number" id="alert-value" step="any" placeholder="Valeur" aria-label="Valeur seuil">
+        <button type="submit" class="btn btn-accent">+ Ajouter l'alerte</button>
+      </form>
+      <p class="hint">Une alerte n'est évaluée que lorsque son titre est en cache (analysé). Pas de notification hors application.</p>
+      <div id="alerts-list" class="alerts-list"></div>
+      <h2 class="alerts-log-title">Déclenchements récents</h2>
+      <div id="alerts-log" class="alerts-log"></div>
     </section>
 
   </main>
@@ -3306,12 +3340,101 @@ document.querySelectorAll(".tab").forEach(btn => {
     // Certains rendus dépendent de la visibilité (Chart.js notamment)
     if (btn.dataset.tab === "positions") renderPositions();
     if (btn.dataset.tab === "analyse") renderAnalysis();
+    if (btn.dataset.tab === "alerts") renderAlerts();
   });
 });
 
+/* ============================= ONGLET 7 : ALERTES — UI ============================= */
+
+// Options de direction + valeur par défaut selon le type choisi.
+function updateAlertFormOptions() {
+  const type = document.getElementById("alert-type").value;
+  const dir = document.getElementById("alert-direction");
+  const val = document.getElementById("alert-value");
+  const opts = {
+    price:  [["above", "au-dessus de"], ["below", "en dessous de"]],
+    global: [["above", "≥"], ["below", "≤"]],
+    rsi:    [["oversold", "survente (≤)"], ["overbought", "surachat (≥)"]],
+    change: [["move", "|variation| ≥"]],
+  }[type];
+  dir.innerHTML = opts.map(([v, l]) => `<option value="${v}">${esc(l)}</option>`).join("");
+  const defVal = { price: "", global: "70", rsi: "30", change: "5" }[type];
+  val.value = defVal;
+}
+
+function renderAlerts() {
+  // Formulaire : liste des tickers de la watchlist.
+  const tickerSel = document.getElementById("alert-ticker");
+  if (tickerSel) {
+    const cur = tickerSel.value;
+    tickerSel.innerHTML = watchlist.length
+      ? watchlist.map(t => `<option value="${esc(t)}">${esc(t)}</option>`).join("")
+      : `<option value="">— watchlist vide —</option>`;
+    if (watchlist.includes(cur)) tickerSel.value = cur;
+  }
+  // Liste des alertes.
+  const list = document.getElementById("alerts-list");
+  if (list) {
+    if (alerts.length === 0) {
+      list.innerHTML = `<p class="analysis-empty">Aucune alerte. Ajoutez-en une ci-dessus.</p>`;
+    } else {
+      list.innerHTML = alerts.map(a => `
+        <div class="alert-item ${a.triggeredAt ? "triggered" : ""}">
+          <span class="alert-ticker">${esc(a.ticker)}</span>
+          <span class="alert-cond">${esc(alertLabel(a))}</span>
+          <span class="alert-state">${a.triggeredAt ? "🔔 Déclenchée " + fdate(a.triggeredAt) : (a.enabled ? "Active" : "Désactivée")}</span>
+          <label class="alert-toggle"><input type="checkbox" class="js-alert-toggle" data-id="${a.id}" ${a.enabled ? "checked" : ""}> active</label>
+          <button type="button" class="btn btn-small btn-ghost js-alert-del" data-id="${a.id}">✕</button>
+        </div>`).join("");
+    }
+  }
+  // Journal.
+  const log = document.getElementById("alerts-log");
+  if (log) {
+    log.innerHTML = alertLog.length
+      ? alertLog.map(l => `<div class="alert-log-row">🔔 <strong>${esc(l.ticker)}</strong> — ${esc(l.label)} <span class="muted">${esc(fdate(l.at))}</span></div>`).join("")
+      : `<p class="analysis-empty">Aucun déclenchement dans cette session.</p>`;
+  }
+}
+
+document.getElementById("alert-type").addEventListener("change", updateAlertFormOptions);
+
+document.getElementById("form-alert").addEventListener("submit", e => {
+  e.preventDefault();
+  const ticker = document.getElementById("alert-ticker").value;
+  const type = document.getElementById("alert-type").value;
+  const direction = document.getElementById("alert-direction").value;
+  const value = Number(document.getElementById("alert-value").value);
+  if (!ticker) { toast("Ajoutez d'abord un ticker à la watchlist.", "warn"); return; }
+  if (!isFinite(value)) { toast("Entrez une valeur numérique.", "error"); return; }
+  alerts.push({ id: newAlertId(), ticker, type, direction, value, enabled: true, triggeredAt: null });
+  saveAlerts();
+  renderAlerts();
+  checkAlerts(); // évaluation immédiate
+  toast(`Alerte ajoutée : ${ticker} — ${alertLabel(alerts[alerts.length - 1])}.`, "success");
+});
+
+document.getElementById("alerts-list").addEventListener("click", e => {
+  const del = e.target.closest(".js-alert-del");
+  if (del) {
+    alerts = alerts.filter(a => a.id !== Number(del.dataset.id));
+    saveAlerts(); renderAlerts();
+  }
+});
+document.getElementById("alerts-list").addEventListener("change", e => {
+  const tog = e.target.closest(".js-alert-toggle");
+  if (tog) {
+    const a = alerts.find(x => x.id === Number(tog.dataset.id));
+    if (a) { a.enabled = tog.checked; a.triggeredAt = null; saveAlerts(); checkAlerts(); }
+  }
+});
+
+updateAlertFormOptions();
+renderAlerts();
+
 // Raccourcis clavier F1–F4 façon terminal (sans bloquer si un champ est actif)
 document.addEventListener("keydown", e => {
-  const map = { F1: "dashboard", F2: "positions", F3: "buysim", F4: "analyse", F5: "marche", F6: "allocation" };
+  const map = { F1: "dashboard", F2: "positions", F3: "buysim", F4: "analyse", F5: "marche", F6: "allocation", F7: "alerts" };
   if (map[e.key]) {
     e.preventDefault();
     document.getElementById("tab-" + map[e.key]).click();
