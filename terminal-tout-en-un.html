@@ -626,6 +626,9 @@ th.sortable:hover { color: var(--amber); }
 
         <button class="btn btn-ghost" id="btn-profile" title="Changer de profil">👤 <span id="profile-name-label"></span></button>
         <button class="btn btn-ghost" id="btn-settings" aria-haspopup="dialog">⚙ Source &amp; clé API</button>
+        <button class="btn btn-ghost" id="btn-export" title="Exporter mes données">⬇ Export</button>
+        <button class="btn btn-ghost" id="btn-import" title="Importer des données">⬆ Import</button>
+        <input type="file" id="import-file" accept="application/json" hidden>
       </div>
     </div>
 
@@ -3454,6 +3457,27 @@ document.getElementById("btn-settings").addEventListener("click", () => {
   document.querySelector(`input[name="source"][value="${src}"]`).checked = true;
   settingsDialog.showModal();
 });
+
+/* ============================= EXPORT / IMPORT ============================= */
+
+function exportData() {
+  const payload = {
+    app: "terminal-boursier",
+    version: 1,
+    exportedAt: new Date().toISOString(),
+    profile: currentProfile,
+    data: { watchlist, positions, tickerNames, filters, weightTech, alerts },
+  };
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `terminal-${currentProfile}-${new Date().toISOString().slice(0, 10)}.json`;
+  document.body.appendChild(a); a.click(); a.remove();
+  URL.revokeObjectURL(url);
+  toast("Données exportées (fichier JSON téléchargé).", "success");
+}
+document.getElementById("btn-export").addEventListener("click", exportData);
 
 document.getElementById("btn-settings-close").addEventListener("click", () => settingsDialog.close());
 
