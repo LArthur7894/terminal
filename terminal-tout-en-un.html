@@ -2082,41 +2082,41 @@ function renderWatchlist() {
       const { ind, score, signal } = entry;
       const stale = isStale(entry) ? `<span class="stale-badge" title="Données de plus de 24 h">cache</span>` : "";
       tr.innerHTML = `
-        <td>${tickerCellHtml(ticker)}${stale}</td>
-        <td class="num">${fnum(ind.price)}</td>
-        <td class="num ${pctClass(ind.changePct)}">${fpct(ind.changePct)}</td>
-        <td class="num ${ind.rsi !== null && ind.rsi <= 30 ? "up" : ind.rsi >= 70 ? "down" : ""}">${ind.rsi === null ? "—" : fmtNum.format(ind.rsi)}</td>
-        <td class="num">${fnum(ind.sma50)}</td>
-        <td class="num">${fnum(ind.sma200)}</td>
-        <td>
+        <td class="card-title">${tickerCellHtml(ticker)}${stale}</td>
+        <td class="num" data-label="Cours">${fnum(ind.price)}</td>
+        <td class="num ${pctClass(ind.changePct)}" data-label="Var. %">${fpct(ind.changePct)}</td>
+        <td class="num mobile-hide ${ind.rsi !== null && ind.rsi <= 30 ? "up" : ind.rsi >= 70 ? "down" : ""}" data-label="RSI 14">${ind.rsi === null ? "—" : fmtNum.format(ind.rsi)}</td>
+        <td class="num mobile-hide" data-label="SMA 50">${fnum(ind.sma50)}</td>
+        <td class="num mobile-hide" data-label="SMA 200">${fnum(ind.sma200)}</td>
+        <td class="mobile-hide" data-label="Range 52 sem.">
           <div class="range52">
             <span>${fnum(ind.low52)}</span>
             <span class="range-bar"><span class="range-dot" style="left:${(ind.rangePos * 100).toFixed(1)}%"></span></span>
             <span>${fnum(ind.high52)}</span>
           </div>
         </td>
-        <td class="num">
+        <td class="num" data-label="Score">
           <span class="score-cell">
             <span class="score-bar"><span class="score-fill" style="width:${score}%"></span></span>
             <span>${score}</span>
           </span>
         </td>
-        <td class="num">${entry.fundScore ? entry.fundScore.total : "—"}</td>
-        <td class="num">
+        <td class="num" data-label="Fonda">${entry.fundScore ? entry.fundScore.total : "—"}</td>
+        <td class="num" data-label="Global">
           <span class="score-cell">
             <span class="score-bar"><span class="score-fill" style="width:${computeGlobalScore(entry)}%"></span></span>
             <span>${computeGlobalScore(entry)}</span>
           </span>
         </td>
-        <td><span class="signal signal-${signal.toLowerCase()}">${signal}</span></td>
-        <td class="na">${fdate(entry.updated)}</td>
+        <td data-label="Signal"><span class="signal signal-${signal.toLowerCase()}">${signal}</span></td>
+        <td class="na mobile-hide" data-label="MàJ">${fdate(entry.updated)}</td>
         <td class="actions-col"></td>`;
     } else {
       tr.innerHTML = `
-        <td>${tickerCellHtml(ticker)}</td>
-        <td class="num na">—</td><td class="num na">—</td><td class="num na">—</td>
-        <td class="num na">—</td><td class="num na">—</td><td class="na">—</td>
-        <td class="num na">—</td><td class="num na">—</td><td class="num na">—</td><td class="na">—</td><td class="na">jamais</td>
+        <td class="card-title">${tickerCellHtml(ticker)}</td>
+        <td class="num na" data-label="Cours">—</td><td class="num na" data-label="Var. %">—</td><td class="num na mobile-hide" data-label="RSI 14">—</td>
+        <td class="num na mobile-hide" data-label="SMA 50">—</td><td class="num na mobile-hide" data-label="SMA 200">—</td><td class="na mobile-hide" data-label="Range 52 sem.">—</td>
+        <td class="num na" data-label="Score">—</td><td class="num na" data-label="Fonda">—</td><td class="num na" data-label="Global">—</td><td class="na" data-label="Signal">—</td><td class="na mobile-hide" data-label="MàJ">jamais</td>
         <td class="actions-col"></td>`;
     }
 
@@ -2354,13 +2354,13 @@ function renderPositions() {
     const noCache = !cache[pos.ticker];
     const tr = document.createElement("tr");
     tr.innerHTML = `
-      <td><span class="cell-ticker">${esc(pos.ticker)}</span>${noCache ? `<span class="stale-badge" title="Pas de cours en cache : PRU utilisé">PRU</span>` : ""}</td>
-      <td class="num">${fmtNum.format(pos.qty)}</td>
-      <td class="num">${fnum(pos.pru)}</td>
-      <td class="num">${fnum(price)}</td>
-      <td class="num">${fnum(value)}</td>
-      <td class="num ${pctClass(pnl)}">${fnum(pnl)}</td>
-      <td class="num ${pctClass(pnlPct)}">${fpct(pnlPct)}</td>
+      <td class="card-title"><span class="cell-ticker">${esc(pos.ticker)}</span>${noCache ? `<span class="stale-badge" title="Pas de cours en cache : PRU utilisé">PRU</span>` : ""}</td>
+      <td class="num" data-label="Qté">${fmtNum.format(pos.qty)}</td>
+      <td class="num" data-label="PRU">${fnum(pos.pru)}</td>
+      <td class="num" data-label="Cours">${fnum(price)}</td>
+      <td class="num" data-label="Valeur">${fnum(value)}</td>
+      <td class="num ${pctClass(pnl)}" data-label="P&L">${fnum(pnl)}</td>
+      <td class="num ${pctClass(pnlPct)}" data-label="P&L %">${fpct(pnlPct)}</td>
       <td class="actions-col"></td>`;
 
     const actions = tr.querySelector(".actions-col");
@@ -3187,15 +3187,15 @@ function renderMarketTable() {
     const tr = document.createElement("tr");
     const fs = m.entry.fundScore;
     tr.innerHTML = `
-      <td class="na">#${i + 1}</td>
-      <td><span class="cell-ticker">${esc(m.symbol)}</span></td>
-      <td>${esc(m.name)}</td>
-      <td class="num">${fnum(m.entry.ind.price)}</td>
-      <td class="num">${m.entry.score}/100</td>
-      <td class="num">${fs ? fs.total : "—"}</td>
-      <td class="num">${fs ? computeGlobalScore(m.entry) : "—"}</td>
-      <td><span class="signal signal-${m.entry.signal.toLowerCase()}">${m.entry.signal}</span></td>
-      <td class="num ${pctClass(m.entry.ind.perf.y1)}">${fpct(m.entry.ind.perf.y1)}</td>
+      <td class="na" data-label="Rang">#${i + 1}</td>
+      <td class="card-title"><span class="cell-ticker">${esc(m.symbol)}</span></td>
+      <td data-label="Entreprise">${esc(m.name)}</td>
+      <td class="num" data-label="Cours">${fnum(m.entry.ind.price)}</td>
+      <td class="num" data-label="Score">${m.entry.score}/100</td>
+      <td class="num" data-label="Fonda">${fs ? fs.total : "—"}</td>
+      <td class="num" data-label="Global">${fs ? computeGlobalScore(m.entry) : "—"}</td>
+      <td data-label="Signal"><span class="signal signal-${m.entry.signal.toLowerCase()}">${m.entry.signal}</span></td>
+      <td class="num ${pctClass(m.entry.ind.perf.y1)}" data-label="Perf. 1 an">${fpct(m.entry.ind.perf.y1)}</td>
       <td class="actions-col"></td>`;
 
     const actions = tr.querySelector(".actions-col");
