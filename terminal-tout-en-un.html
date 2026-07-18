@@ -1116,6 +1116,7 @@ const LS = {
   weightTech: "term_weight_tech", // part du score technique dans le score global (0..1)
   filters: "term_filters", // critères de filtre par tableau {wl:{...}, mk:{...}}, par profil
   alerts: "term_alerts", // règles d'alerte par profil
+  bot: "term_bot", // portefeuille du bot paper-trading, par profil
 };
 
 /* ============================= ÉTAT GLOBAL ============================= */
@@ -1300,6 +1301,42 @@ function checkAlerts() {
   }
   if (changed) saveAlerts();
   if (typeof renderAlerts === "function") renderAlerts();
+}
+
+/* ============================= BOT (PAPER TRADING) ============================= */
+
+const BOT_DEFAULT_CONFIG = {
+  capital: 10000, ticketPct: 0.10, qualityMin: 60, exitScore: 40,
+  stopVolFactor: 0.4, stopMin: 5, stopMax: 20, rrMin: 1.5, rrMax: 3,
+};
+let bot = lsGet(LS.bot, null);
+if (!bot || typeof bot !== "object") {
+  bot = { started: false, startDate: null, cash: BOT_DEFAULT_CONFIG.capital, positions: [], history: [], config: { ...BOT_DEFAULT_CONFIG } };
+}
+bot.config = { ...BOT_DEFAULT_CONFIG, ...(bot.config || {}) };  // migration douce
+if (!Array.isArray(bot.positions)) bot.positions = [];
+if (!Array.isArray(bot.history)) bot.history = [];
+function saveBot() { lsSet(LS.bot, bot); }
+
+function clamp(x, a, b) { return Math.max(a, Math.min(b, x)); }
+
+// Stop-loss (%) adapté à la volatilité annualisée (ind.vol). Défaut 30 % si absente.
+function botStopPct(ind, cfg) {
+  const vol = (ind && ind.vol != null && isFinite(ind.vol)) ? ind.vol : 30;
+  return clamp(cfg.stopVolFactor * vol, cfg.stopMin, cfg.stopMax);
+}
+// Ratio gain/risque croissant avec le score global (qualityMin → rrMin, 100 → rrMax).
+function botRR(score, cfg) {
+  const span = Math.max(1, 100 - cfg.qualityMin);
+  const t = (score - cfg.qualityMin) / span;
+  return clamp(cfg.rrMin + t * (cfg.rrMax - cfg.rrMin), cfg.rrMin, cfg.rrMax);
+}
+function botTargetPct(ind, score, cfg) { return botStopPct(ind, cfg) * botRR(score, cfg); }
+// Montant pondéré par le score, borné, plafonné au cash. Pas de nombre max de positions.
+function botPositionAmount(score, cfg, cash) {
+  const base = cfg.capital * cfg.ticketPct;
+  const weighted = clamp(base * (score / 70), 0.6 * base, 1.6 * base);
+  return Math.min(weighted, cash);
 }
 
 /* ============================= HELPERS localStorage ============================= */
