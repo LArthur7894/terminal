@@ -355,6 +355,9 @@ th.sortable:hover { color: var(--amber); }
 .compare-chk { display: inline-flex; align-items: center; gap: 5px; font-family: var(--mono); font-size: 13px; }
 .compare-data td.best { color: var(--green); font-weight: 700; }
 .compare-data th:first-child, .compare-data td:first-child { text-align: left; color: var(--text-dim); }
+.perf-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+#perf-stats { margin: 8px 0 12px; }
+#perf-stats dd { font-size: 16px; }
 #watchlist-filter { width: 100%; max-width: 360px; }
 .stale-badge {
   font-size: 10px; color: var(--text-dim);
@@ -852,6 +855,16 @@ th.sortable:hover { color: var(--amber); }
           </div>
           <p class="hint" id="chart-hint">Le cours utilisé est le dernier cours en cache (onglet Dashboard → Analyser). À défaut, le PRU est utilisé.</p>
         </div>
+      </div>
+
+      <div class="chart-card">
+        <div class="perf-head">
+          <h2>Évolution du portefeuille</h2>
+          <button class="btn btn-small btn-ghost" id="btn-perf-clear">Effacer l'historique</button>
+        </div>
+        <div id="perf-stats" class="impact-grid"></div>
+        <div class="chart-holder"><canvas id="perf-canvas"></canvas></div>
+        <p class="hint">Un point est enregistré par jour d'ouverture de l'app, tant que vous avez au moins une position.</p>
       </div>
     </section>
 
@@ -2660,7 +2673,56 @@ function renderPositions() {
   elPct.className = "num " + pctClass(totalPnl);
 
   renderAllocationChart();
+  recordPerfSnapshot();
+  renderPerfJournal();
 }
+
+let perfChart = null;
+
+function renderPerfJournal() {
+  const statsEl = document.getElementById("perf-stats");
+  const canvas = document.getElementById("perf-canvas");
+  if (!statsEl) return;
+
+  if (perfChart) { perfChart.destroy(); perfChart = null; }
+
+  if (!perfJournal.length) {
+    statsEl.innerHTML = `<p class="analysis-empty">Aucun historique pour l'instant. Ajoutez des positions : la courbe se construira à chaque ouverture (1 point/jour).</p>`;
+    return;
+  }
+
+  const first = perfJournal[0].value, cur = perfJournal[perfJournal.length - 1].value;
+  const chg = cur - first, chgPct = first > 0 ? (chg / first) * 100 : 0;
+  const vals = perfJournal.map(p => p.value);
+  const hi = Math.max(...vals), lo = Math.min(...vals);
+  statsEl.innerHTML = `
+    <div><dt>Valeur actuelle</dt><dd>${fnum(cur)} €</dd></div>
+    <div><dt>Depuis le début</dt><dd class="${pctClass(chg)}">${fnum(chg)} € (${fpct(chgPct)})</dd></div>
+    <div><dt>Plus haut</dt><dd>${fnum(hi)} €</dd></div>
+    <div><dt>Plus bas</dt><dd>${fnum(lo)} €</dd></div>`;
+
+  if (perfJournal.length < 2 || typeof Chart === "undefined") return;
+  perfChart = new Chart(canvas, {
+    type: "line",
+    data: {
+      labels: perfJournal.map(p => fdateShort(p.date)),
+      datasets: [{ data: vals, borderColor: "#ffb000", backgroundColor: "rgba(255,176,0,0.08)", borderWidth: 2, pointRadius: 0, tension: 0.15, fill: true }],
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: { legend: { display: false }, tooltip: { callbacks: { label: ctx => fnum(ctx.parsed.y) + " €" } } },
+      scales: {
+        x: { ticks: { color: "#7b8794", maxTicksLimit: 6, font: { family: "'IBM Plex Mono', monospace", size: 10 } }, grid: { color: "#1a2028" } },
+        y: { ticks: { color: "#7b8794", font: { family: "'IBM Plex Mono', monospace", size: 10 } }, grid: { color: "#1a2028" } },
+      },
+    },
+  });
+}
+
+document.getElementById("btn-perf-clear").addEventListener("click", () => {
+  if (!window.confirm("Effacer l'historique de performance du portefeuille ?")) return;
+  perfJournal = []; lsSet(LS.perfJournal, perfJournal); renderPerfJournal();
+});
 
 // Passage du formulaire en mode "édition"
 function startEditPosition(pos) {
