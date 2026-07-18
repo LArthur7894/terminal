@@ -3948,7 +3948,49 @@ document.getElementById("compare-periods").addEventListener("click", e => {
   if (btn) { comparePeriod = btn.dataset.period; renderCompare(); }
 });
 
-function renderCompareChart() { /* remplacé en Task 2 */ }
+// Courbes de prix normalisées à 100 au début de la période, superposées.
+function renderCompareChart() {
+  const canvas = document.getElementById("compare-canvas");
+  if (!canvas || typeof Chart === "undefined") return;
+  if (compareChart) { compareChart.destroy(); compareChart = null; }
+  if (compareSel.length < 2) return;
+
+  const period = CHART_PERIODS.find(p => p.key === comparePeriod) || CHART_PERIODS[4];
+  let labels = [];
+  const datasets = compareSel.map((t, i) => {
+    const hist = cache[t] && cache[t].hist;
+    if (!hist || !Array.isArray(hist.closes)) return null;
+    const n = Math.min(period.days, hist.closes.length);
+    const closes = hist.closes.slice(0, n).reverse();
+    const dates = hist.dates.slice(0, n).reverse();
+    if (dates.length > labels.length) labels = dates.map(fdateShort);
+    const base = closes.find(c => c != null && isFinite(c) && c > 0) || closes[0];
+    const norm = closes.map(c => (c != null && isFinite(c) && base) ? (c / base) * 100 : null);
+    return {
+      label: t,
+      data: norm,
+      borderColor: COMPARE_COLORS[i],
+      backgroundColor: "transparent",
+      borderWidth: 2, pointRadius: 0, tension: 0.15,
+    };
+  }).filter(Boolean);
+
+  compareChart = new Chart(canvas, {
+    type: "line",
+    data: { labels, datasets },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: {
+        legend: { display: true, labels: { color: "#d7dde3", font: { family: "'IBM Plex Mono', monospace", size: 11 } } },
+        tooltip: { callbacks: { label: ctx => `${ctx.dataset.label}: ${fnum(ctx.parsed.y)} (base 100)` } },
+      },
+      scales: {
+        x: { ticks: { color: "#7b8794", maxTicksLimit: 6, font: { family: "'IBM Plex Mono', monospace", size: 10 } }, grid: { color: "#1a2028" } },
+        y: { ticks: { color: "#7b8794", font: { family: "'IBM Plex Mono', monospace", size: 10 } }, grid: { color: "#1a2028" } },
+      },
+    },
+  });
+}
 
 // Raccourcis clavier F1–F4 façon terminal (sans bloquer si un champ est actif)
 document.addEventListener("keydown", e => {
