@@ -5,6 +5,16 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>TERMINAL — Suivi boursier personnel</title>
 
+  <!-- PWA : installable + hors-ligne (best-effort, n'affecte pas l'app si non supporté) -->
+  <link rel="manifest" href="/manifest.webmanifest">
+  <meta name="theme-color" content="#ffb000">
+  <link rel="icon" href="/icon.svg" type="image/svg+xml">
+  <script>
+    if ("serviceWorker" in navigator) {
+      window.addEventListener("load", () => navigator.serviceWorker.register("/sw.js").catch(() => {}));
+    }
+  </script>
+
   <!-- Police monospace IBM Plex Mono (chiffres et données) + IBM Plex Sans (textes) -->
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>

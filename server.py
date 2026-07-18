@@ -150,6 +150,12 @@ def _normalize_fundamentals(sym, node):
 class Handler(SimpleHTTPRequestHandler):
     """Fichiers statiques + routes /api/history, /api/search, /api/news, /api/screener."""
 
+    # Type MIME correct pour le manifeste PWA (sinon servi en octet-stream, refusé par le navigateur).
+    extensions_map = {
+        **SimpleHTTPRequestHandler.extensions_map,
+        ".webmanifest": "application/manifest+json",
+    }
+
     def do_GET(self):
         parsed = urlparse(self.path)
         if parsed.path == "/api/history":
