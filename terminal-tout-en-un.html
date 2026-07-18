@@ -351,6 +351,10 @@ th.sortable:hover { color: var(--amber); }
 .bot-settings summary { cursor: pointer; color: var(--text-dim); font-size: 12px; text-transform: uppercase; letter-spacing: 1px; }
 .bot-settings .filter-panel { margin-top: 10px; }
 #bot-positions, #bot-history { margin-bottom: 8px; }
+.compare-select { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 10px; }
+.compare-chk { display: inline-flex; align-items: center; gap: 5px; font-family: var(--mono); font-size: 13px; }
+.compare-data td.best { color: var(--green); font-weight: 700; }
+.compare-data th:first-child, .compare-data td:first-child { text-align: left; color: var(--text-dim); }
 #watchlist-filter { width: 100%; max-width: 360px; }
 .stale-badge {
   font-size: 10px; color: var(--text-dim);
@@ -709,6 +713,7 @@ th.sortable:hover { color: var(--amber); }
       <button class="tab" role="tab" aria-selected="false" aria-controls="panel-allocation" id="tab-allocation" data-tab="allocation">F6 · ALLOCATION</button>
       <button class="tab" role="tab" aria-selected="false" aria-controls="panel-alerts" id="tab-alerts" data-tab="alerts">F7 · ALERTES</button>
       <button class="tab" role="tab" aria-selected="false" aria-controls="panel-bot" id="tab-bot" data-tab="bot">F8 · BOT</button>
+      <button class="tab" role="tab" aria-selected="false" aria-controls="panel-compare" id="tab-compare" data-tab="compare">F9 · COMPARER</button>
     </nav>
   </header>
 
@@ -1010,6 +1015,17 @@ th.sortable:hover { color: var(--amber); }
         <summary>Réglages du bot</summary>
         <div id="bot-config" class="filter-panel"></div>
       </details>
+    </section>
+
+    <!-- ======================= ONGLET 9 : COMPARER ======================= -->
+    <section class="panel" id="panel-compare" role="tabpanel" aria-labelledby="tab-compare" hidden>
+      <div class="panel-head">
+        <h1>Comparer <span class="muted">/ 2 à 4 titres de la watchlist, côte à côte</span></h1>
+      </div>
+      <div id="compare-select" class="compare-select"></div>
+      <div id="compare-periods" class="chart-periods" role="tablist"></div>
+      <div class="chart-holder"><canvas id="compare-canvas"></canvas></div>
+      <div id="compare-table"></div>
     </section>
 
   </main>
@@ -3635,6 +3651,7 @@ document.querySelectorAll(".tab").forEach(btn => {
     if (btn.dataset.tab === "analyse") renderAnalysis();
     if (btn.dataset.tab === "alerts") renderAlerts();
     if (btn.dataset.tab === "bot") renderBot();
+    if (btn.dataset.tab === "compare") renderCompare();
   });
 });
 
@@ -3837,9 +3854,105 @@ document.getElementById("panel-bot").addEventListener("change", e => {
 
 renderBot();
 
+/* ============================= ONGLET 9 : COMPARER ============================= */
+
+let compareSel = [];
+let comparePeriod = "1a";
+let compareChart = null;
+const COMPARE_COLORS = ["#ffb000", "#4aa8ff", "#b980ff", "#2dd4bf"];
+
+// Métriques comparées : get(entry) -> nombre|null ; dir "high"/"low"/"none" ; fmt(v)->string.
+const COMPARE_METRICS = [
+  ["Cours", e => e.ind ? e.ind.price : null, "none", v => fnum(v)],
+  ["Perf. 1 mois", e => e.ind && e.ind.perf ? e.ind.perf.m1 : null, "high", v => fpct(v)],
+  ["Perf. 3 mois", e => e.ind && e.ind.perf ? e.ind.perf.m3 : null, "high", v => fpct(v)],
+  ["Perf. 1 an", e => e.ind && e.ind.perf ? e.ind.perf.y1 : null, "high", v => fpct(v)],
+  ["RSI 14", e => e.ind ? e.ind.rsi : null, "none", v => fnum(v)],
+  ["Volatilité", e => e.ind ? e.ind.vol : null, "low", v => fnum(v) + " %"],
+  ["Score technique", e => e.score != null ? e.score : null, "high", v => String(v)],
+  ["Score fondamental", e => e.fundScore ? e.fundScore.total : null, "high", v => String(v)],
+  ["Score global", e => e.score != null ? computeGlobalScore(e) : null, "high", v => String(v)],
+  ["PER", e => e.fund ? e.fund.trailingPE : null, "low", v => fnum(v)],
+  ["PER prév.", e => e.fund ? e.fund.forwardPE : null, "low", v => fnum(v)],
+  ["Rendement dividende", e => e.fund ? e.fund.dividendYield : null, "high", v => ffrac(v)],
+  ["Marge nette", e => e.fund ? e.fund.profitMargins : null, "high", v => ffrac(v)],
+  ["ROE", e => e.fund ? e.fund.returnOnEquity : null, "high", v => ffrac(v)],
+  ["Croissance CA", e => e.fund ? e.fund.revenueGrowth : null, "high", v => ffrac(v)],
+  ["Dette / cap. propres", e => e.fund && e.fund.debtToEquity != null ? e.fund.debtToEquity / 100 : null, "low", v => fnum(v)],
+  ["Capitalisation", e => e.fund ? e.fund.marketCap : null, "high", (v, e) => fmtMarketCap(v, e.fund && e.fund.currency)],
+];
+
+// Index de la meilleure valeur (max si high, min si low). -1 si none/aucune.
+function compareBest(values, dir) {
+  if (dir === "none") return -1;
+  let best = -1, bestVal = null;
+  values.forEach((v, i) => {
+    if (v == null || !isFinite(v)) return;
+    if (bestVal == null || (dir === "high" ? v > bestVal : v < bestVal)) { bestVal = v; best = i; }
+  });
+  return best;
+}
+
+function renderCompare() {
+  const selEl = document.getElementById("compare-select");
+  const tableEl = document.getElementById("compare-table");
+  if (!selEl) return;
+
+  const analyzable = watchlist.filter(t => cache[t]);
+  compareSel = compareSel.filter(t => analyzable.includes(t));
+
+  if (analyzable.length === 0) {
+    selEl.innerHTML = `<p class="analysis-empty">Analysez d'abord des titres (onglet Dashboard F1) pour pouvoir les comparer.</p>`;
+    tableEl.innerHTML = "";
+    return;
+  }
+
+  const full = compareSel.length >= 4;
+  selEl.innerHTML = analyzable.map(t => {
+    const checked = compareSel.includes(t);
+    return `<label class="compare-chk"><input type="checkbox" class="js-compare-chk" value="${esc(t)}" ${checked ? "checked" : ""} ${(!checked && full) ? "disabled" : ""}> ${esc(t)}</label>`;
+  }).join("");
+
+  document.getElementById("compare-periods").innerHTML = CHART_PERIODS.map(p =>
+    `<button type="button" class="btn btn-small period-btn ${comparePeriod === p.key ? "btn-accent" : "btn-ghost"}" data-period="${p.key}">${p.label}</button>`
+  ).join("");
+
+  if (compareSel.length < 2) {
+    tableEl.innerHTML = `<p class="analysis-empty">Cochez au moins 2 titres pour les comparer.</p>`;
+    if (compareChart) { compareChart.destroy(); compareChart = null; }
+    return;
+  }
+
+  const entries = compareSel.map(t => cache[t]);
+  const header = `<th>Métrique</th>` + compareSel.map((t, i) => `<th class="num" style="color:${COMPARE_COLORS[i]}">${esc(t)}</th>`).join("");
+  const rows = COMPARE_METRICS.map(([label, get, dir, fmt]) => {
+    const vals = entries.map(e => { const v = get(e); return (v != null && isFinite(v)) ? v : null; });
+    const best = compareBest(vals, dir);
+    const cells = vals.map((v, i) => `<td class="num ${i === best ? "best" : ""}">${v == null ? "—" : esc(fmt(v, entries[i]))}</td>`).join("");
+    return `<tr><td>${esc(label)}</td>${cells}</tr>`;
+  }).join("");
+  tableEl.innerHTML = `<div class="table-wrap"><table class="data-table compare-data"><thead><tr>${header}</tr></thead><tbody>${rows}</tbody></table></div>`;
+
+  renderCompareChart();
+}
+
+document.getElementById("compare-select").addEventListener("change", e => {
+  const chk = e.target.closest(".js-compare-chk");
+  if (!chk) return;
+  if (chk.checked) { if (!compareSel.includes(chk.value) && compareSel.length < 4) compareSel.push(chk.value); }
+  else { compareSel = compareSel.filter(t => t !== chk.value); }
+  renderCompare();
+});
+document.getElementById("compare-periods").addEventListener("click", e => {
+  const btn = e.target.closest(".period-btn");
+  if (btn) { comparePeriod = btn.dataset.period; renderCompare(); }
+});
+
+function renderCompareChart() { /* remplacé en Task 2 */ }
+
 // Raccourcis clavier F1–F4 façon terminal (sans bloquer si un champ est actif)
 document.addEventListener("keydown", e => {
-  const map = { F1: "dashboard", F2: "positions", F3: "buysim", F4: "analyse", F5: "marche", F6: "allocation", F7: "alerts", F8: "bot" };
+  const map = { F1: "dashboard", F2: "positions", F3: "buysim", F4: "analyse", F5: "marche", F6: "allocation", F7: "alerts", F8: "bot", F9: "compare" };
   if (map[e.key]) {
     e.preventDefault();
     document.getElementById("tab-" + map[e.key]).click();
