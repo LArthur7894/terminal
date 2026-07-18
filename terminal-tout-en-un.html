@@ -1173,6 +1173,8 @@ const LS = {
   alerts: "term_alerts", // règles d'alerte par profil
   bot: "term_bot", // portefeuille du bot paper-trading, par profil
   perfJournal: "term_perf_journal", // historique valeur portefeuille {date,value}, par profil
+  fx: "term_fx", // taux de change en cache { "FROM->TO": {rate, updated} }, par profil
+  baseCurrency: "term_base_currency", // devise de référence du portefeuille (défaut EUR)
 };
 
 /* ============================= ÉTAT GLOBAL ============================= */
@@ -1181,6 +1183,8 @@ let watchlist  = lsGet(LS.watchlist, []);   // ["AAPL", "MC.PA", ...]
 let cache      = lsGet(LS.cache, {});       // { TICKER: {updated, hist, ind} }
 let positions  = lsGet(LS.positions, []);   // [{id, ticker, qty, pru}]
 let tickerNames = lsGet(LS.tickerNames, {}); // { TICKER: "Nom de l'entreprise" }
+let fxRates = lsGet(LS.fx, {});             // { "USD->EUR": {rate, updated} }
+if (!fxRates || typeof fxRates !== "object") fxRates = {};
 
 // Pondération du score global : part du technique (0..1), le reste va au fondamental.
 // Réglable via le curseur de l'onglet Analyse, persistée par profil.
@@ -1591,6 +1595,78 @@ function renderQuota() {
   el.classList.toggle("low",  left > 0 && left <= 5);
   el.classList.toggle("zero", left === 0);
   suffix.textContent = "req. restantes";
+}
+
+/* ============================= TAUX DE CHANGE (FX) =============================
+ * Les agrégats du portefeuille (total, allocation, courbe) sont convertis vers
+ * une devise de référence. Les taux viennent de la paire Yahoo {FROM}{TO}=X
+ * (ex. USDEUR=X = nombre de TO pour 1 FROM), via le relais /api/history — jamais
+ * via Alpha Vantage. Cache mémoire + localStorage, rafraîchi au-delà de 12 h.
+ * ============================================================================ */
+
+const FX_MAX_AGE_MS = 12 * 3600 * 1000;
+const FX_CURRENCIES = ["EUR", "USD", "GBP", "CHF", "CAD", "JPY", "AUD"];
+
+function getBaseCurrency() {
+  const c = lsGet(LS.baseCurrency, "EUR");
+  return FX_CURRENCIES.includes(c) ? c : "EUR";
+}
+
+// Devise native d'une position = devise du cours en cache, sinon inconnue (null).
+function positionCurrency(pos) {
+  const entry = cache[pos.ticker];
+  return (entry && entry.hist && entry.hist.currency) ? entry.hist.currency : null;
+}
+
+// Lecture SYNCHRONE du cache (aucun réseau). Renvoie le taux ou null si absent.
+function fxRateCached(from, to) {
+  if (from === to) return 1;
+  const hit = fxRates[`${from}->${to}`];
+  return hit && isFinite(hit.rate) && hit.rate > 0 ? hit.rate : null;
+}
+
+// Récupère (et met en cache) le taux from->to. Renvoie le nombre ou null si échec.
+async function getFxRate(from, to) {
+  if (from === to) return 1;
+  const k = `${from}->${to}`;
+  const hit = fxRates[k];
+  if (hit && isFinite(hit.rate) && hit.rate > 0
+      && Date.now() - new Date(hit.updated).getTime() < FX_MAX_AGE_MS) {
+    return hit.rate; // frais → pas de réseau
+  }
+  if (location.protocol === "file:") return fxRateCached(from, to); // pas de relais dispo
+
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), FETCH_TIMEOUT_MS);
+  try {
+    const resp = await fetch("/api/history?symbol=" + encodeURIComponent(`${from}${to}=X`),
+                             { signal: ctrl.signal });
+    clearTimeout(timer);
+    const data = await resp.json();
+    const rate = data && Array.isArray(data.closes) ? Number(data.closes[0]) : NaN;
+    if (!isFinite(rate) || rate <= 0) return fxRateCached(from, to);
+    fxRates[k] = { rate, updated: new Date().toISOString() };
+    lsSet(LS.fx, fxRates);
+    return rate;
+  } catch {
+    clearTimeout(timer);
+    return fxRateCached(from, to); // échec réseau → on retombe sur l'ancien taux s'il existe
+  }
+}
+
+// Pré-charge tous les taux nécessaires (devises du portefeuille ≠ base), puis re-render
+// pour que renderPositions (synchrone) trouve les taux dans le cache.
+async function ensureFxRates() {
+  const base = getBaseCurrency();
+  const needed = new Set();
+  for (const pos of positions) {
+    const cur = positionCurrency(pos);
+    if (cur && cur !== base) needed.add(cur);
+  }
+  if (needed.size === 0) return;
+  const before = JSON.stringify(fxRates);
+  await Promise.all([...needed].map(cur => getFxRate(cur, base)));
+  if (JSON.stringify(fxRates) !== before) renderPositions();
 }
 
 /* ============================= SOURCE DE DONNÉES ============================= */
