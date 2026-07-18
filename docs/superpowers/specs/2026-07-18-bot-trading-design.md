@@ -48,7 +48,7 @@ bot = {
   ],
   config: {
     capital: 10000,        // capital initial (au démarrage / reset)
-    maxPositions: 5,
+    ticketPct: 0.10,       // taille de base d'une position = 10 % du capital (pondérée par le score)
     qualityMin: 60,        // score global mini pour acheter
     exitScore: 40,         // score global sous lequel on sort (réévaluation)
     stopVolFactor: 0.4,    // stop = facteur × volatilité annualisée
@@ -73,10 +73,11 @@ function botRR(score, cfg) {                          // ratio gain/risque adapt
 function botTargetPct(ind, score, cfg) { return botStopPct(ind, cfg) * botRR(score, cfg); }
 
 // Montant investi pondéré par le score, borné pour la diversification, plafonné au cash dispo.
+// Pas de nombre max de positions : le bot déploie tout le capital tant qu'il trouve des candidats.
 function botPositionAmount(score, cfg, cash) {
-  const equal = cfg.capital / cfg.maxPositions;
-  const weighted = clamp(equal * (score / 70), 0.6 * equal, 1.6 * equal);
-  return Math.min(weighted, cash);
+  const base = cfg.capital * cfg.ticketPct;                       // ex. 10 % du capital
+  const weighted = clamp(base * (score / 70), 0.6 * base, 1.6 * base);
+  return Math.min(weighted, cash);                                // la dernière position prend le cash restant
 }
 ```
 (`clamp` existe déjà — sinon `clamp(x,a,b)=Math.max(a,Math.min(b,x))`.)
@@ -102,14 +103,23 @@ absent ou périmé (> 24 h), `await analyzeTicker(ticker, null, {silent:true, sk
 - Sur sortie : `cash += qty*exitPrice` ; ajouter à `history` (avec `pnl`, `pnlPct`, `reason`,
   `exitDate`) ; retirer de `positions`.
 
-**c) Entrées** : tant que `positions.length < maxPositions` et `cash` > 1 :
+**c) Entrées** (le bot investit tout le capital, sans limite de nombre de positions) : tant que
+`cash >= 0.2 × (capital × ticketPct)` et qu'il reste des candidats :
 - Candidats = entrées de `marketCache` (dernier scan) **avec** `ind.price`, non déjà détenues, dont
   `computeGlobalScore >= qualityMin` ; triées par score global décroissant.
 - Prendre le meilleur candidat : `score`, `ind` ; `stopPct = botStopPct(ind,cfg)`,
   `targetPct = botTargetPct(ind,score,cfg)`, `amount = botPositionAmount(score,cfg,cash)`.
-  Si `amount < 1` → stop (plus assez de cash). `qty = amount / ind.price`.
+  Si `amount < 1` → stop. `qty = amount / ind.price`.
 - Ouvrir : `cash -= amount` ; `positions.push({ ticker, entryDate: today, entryPrice: ind.price,
   qty, stopPct, targetPct, entryScore: score })`. Retirer ce ticker des candidats et recommencer.
+- S'il n'y a pas assez de candidats de qualité, le cash restant n'est pas forcé (pas d'achat de
+  mauvais titres) — il servira quand de nouveaux candidats apparaîtront (nouveau scan) ou après une
+  vente.
+
+**Vente manuelle** — `botSellManual(ticker)` : ferme la position au **cours actuel**
+(`e.ind.price`), `cash += qty*prix`, ajout à `history` avec raison **« manuelle »**, `saveBot()` +
+`renderBot()`. Le cash ainsi libéré est réinvesti au prochain `runBot()` (ou via « Évaluer
+maintenant »).
 
 **d)** `saveBot()` + `renderBot()`.
 
@@ -126,11 +136,13 @@ absent ou périmé (> 24 h), `await analyzeTicker(ticker, null, {silent:true, sk
   - **Bouton « Démarrer le bot »** (si pas démarré) ; sinon **« Évaluer maintenant »** +
     **« Réinitialiser »** (avec confirmation).
   - **Positions ouvertes** (tableau/cartes, responsive comme les autres) : ticker, date d'achat,
-    prix d'achat, cours actuel, +/− %, stop (prix), cible (prix), score courant.
+    prix d'achat, cours actuel, +/− %, stop (prix), cible (prix), score courant, et un bouton
+    **« Vendre »** (vente manuelle immédiate au cours actuel → `botSellManual`).
   - **Historique des trades** : ticker, entrée→sortie (dates/prix), P&L, **raison** (stop / cible /
     réévaluation), avec code couleur gain/perte.
-  - **Réglages** (repliables) : capital, max positions, seuil qualité, seuil de sortie, facteur de
-    stop, min/max stop, ratio min/max — tous réglables, `saveBot()` à chaque changement.
+  - **Réglages** (repliables) : capital, taille de ticket (% du capital), seuil qualité, seuil de
+    sortie, facteur de stop, min/max stop, ratio min/max — tous réglables, `saveBot()` à chaque
+    changement.
 - `renderBot()` : recalcule le résumé au cours courant (via `cache`/`marketCache`), rend positions
   + historique + réglages. Appelé au chargement, sur bascule F8, après `runBot()` et après tout
   changement de réglage.
@@ -162,8 +174,10 @@ try/catch). Ne bloque pas le chargement (async).
 - **Sorties (rejeu)** : position fictive avec un `hist` contenant une clôture sous le stop → sortie
   « stop-loss » au bon jour ; une clôture au-dessus de la cible → « prise de bénéfice » ; sinon
   score bas → « réévaluation ».
-- **Entrées** : marketCache fictif de titres notés → le bot achète les meilleurs (≥ seuil), respecte
-  max positions et cash, taille pondérée par le score.
+- **Entrées** : marketCache fictif de titres notés → le bot achète les meilleurs (≥ seuil), déploie
+  le capital sans limite de nombre, taille pondérée par le score, s'arrête quand le cash est épuisé.
+- **Vente manuelle** : `botSellManual` ferme la position au cours courant, crédite le cash, historise
+  avec raison « manuelle » ; le cash est réinvesti au `runBot()` suivant.
 - **UI** : onglet F8 accessible (clavier F8), démarrage, évaluation, reset, positions + historique
   affichés, réglages persistés ; responsive (cartes sur mobile).
 - **Non-régression** : onglets F1–F7 inchangés ; `py -m unittest discover tests` vert.
