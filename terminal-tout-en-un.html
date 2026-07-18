@@ -1156,6 +1156,7 @@ const LS = {
   filters: "term_filters", // critères de filtre par tableau {wl:{...}, mk:{...}}, par profil
   alerts: "term_alerts", // règles d'alerte par profil
   bot: "term_bot", // portefeuille du bot paper-trading, par profil
+  perfJournal: "term_perf_journal", // historique valeur portefeuille {date,value}, par profil
 };
 
 /* ============================= ÉTAT GLOBAL ============================= */
@@ -2565,6 +2566,27 @@ function renderTape() {
 /* ============================= ONGLET 2 : POSITIONS ============================= */
 
 // Cours de référence d'une position : dernier cours en cache, sinon PRU.
+let perfJournal = lsGet(LS.perfJournal, []);
+if (!Array.isArray(perfJournal)) perfJournal = [];
+
+// Enregistre la valeur du portefeuille du jour (1 point/jour). Rien si aucune position.
+function recordPerfSnapshot() {
+  if (!Array.isArray(perfJournal)) perfJournal = [];
+  if (positions.length === 0) return;
+  const value = positions.reduce((s, p) => s + p.qty * refPrice(p), 0);
+  if (!isFinite(value) || value <= 0) return;
+  const today = new Date().toISOString().slice(0, 10);
+  const last = perfJournal[perfJournal.length - 1];
+  if (last && last.date === today) {
+    if (Math.abs(last.value - value) < 0.005) return;
+    last.value = value;
+  } else {
+    perfJournal.push({ date: today, value });
+  }
+  if (perfJournal.length > 1500) perfJournal = perfJournal.slice(-1500);
+  lsSet(LS.perfJournal, perfJournal);
+}
+
 function refPrice(pos) {
   const entry = cache[pos.ticker];
   return entry ? entry.ind.price : pos.pru;
@@ -3502,6 +3524,7 @@ document.getElementById("btn-market-enrich").addEventListener("click", enrichMar
 renderMarketResults(); // affichage initial depuis le cache existant (watchlist déjà analysée, etc.)
 loadMarketCache(); // repeuple le cache marché depuis IndexedDB (best-effort)
 if (bot.started) { setTimeout(() => runBot().catch(() => {}), 1500); } // laisse le cache marché se charger d'abord
+recordPerfSnapshot(); // point de performance du jour (si positions)
 
 /* ============================= FILTRES & TRI — CÂBLAGE ============================= */
 
@@ -4023,7 +4046,7 @@ function exportData() {
     version: 1,
     exportedAt: new Date().toISOString(),
     profile: currentProfile,
-    data: { watchlist, positions, tickerNames, filters, weightTech, alerts },
+    data: { watchlist, positions, tickerNames, filters, weightTech, alerts, perfJournal },
   };
   const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
   const url = URL.createObjectURL(blob);
@@ -4077,6 +4100,11 @@ function importData(file) {
       existing.add(sig(a)); addedA++;
     }
     // weightTech et filters : inchangés (préférences du profil courant).
+    // Journal de perf : si le profil courant n'en a pas, on récupère l'importé (sinon on garde).
+    if ((!Array.isArray(perfJournal) || perfJournal.length === 0) && Array.isArray(d.perfJournal)) {
+      perfJournal = d.perfJournal;
+      lsSet(LS.perfJournal, perfJournal);
+    }
 
     lsSet(LS.watchlist, watchlist);
     lsSet(LS.positions, positions);
