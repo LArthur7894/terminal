@@ -345,6 +345,12 @@ th.sortable:hover { color: var(--amber); }
 .alert-item .alert-state { color: var(--text-dim); }
 .alerts-log-title { font-size: 13px; text-transform: uppercase; letter-spacing: 1px; color: var(--text-dim); }
 .alert-log-row { font-size: 12px; padding: 3px 0; }
+.bot-summary { margin-bottom: 14px; }
+.bot-summary .impact-grid dd { font-size: 18px; }
+.bot-settings { margin-top: 16px; }
+.bot-settings summary { cursor: pointer; color: var(--text-dim); font-size: 12px; text-transform: uppercase; letter-spacing: 1px; }
+.bot-settings .filter-panel { margin-top: 10px; }
+#bot-positions, #bot-history { margin-bottom: 8px; }
 #watchlist-filter { width: 100%; max-width: 360px; }
 .stale-badge {
   font-size: 10px; color: var(--text-dim);
@@ -702,6 +708,7 @@ th.sortable:hover { color: var(--amber); }
       <button class="tab" role="tab" aria-selected="false" aria-controls="panel-marche" id="tab-marche" data-tab="marche">F5 · MARCHÉ</button>
       <button class="tab" role="tab" aria-selected="false" aria-controls="panel-allocation" id="tab-allocation" data-tab="allocation">F6 · ALLOCATION</button>
       <button class="tab" role="tab" aria-selected="false" aria-controls="panel-alerts" id="tab-alerts" data-tab="alerts">F7 · ALERTES</button>
+      <button class="tab" role="tab" aria-selected="false" aria-controls="panel-bot" id="tab-bot" data-tab="bot">F8 · BOT</button>
     </nav>
   </header>
 
@@ -987,6 +994,22 @@ th.sortable:hover { color: var(--amber); }
       <div id="alerts-list" class="alerts-list"></div>
       <h2 class="alerts-log-title">Déclenchements récents</h2>
       <div id="alerts-log" class="alerts-log"></div>
+    </section>
+
+    <!-- ======================= ONGLET 8 : BOT ======================= -->
+    <section class="panel" id="panel-bot" role="tabpanel" aria-labelledby="tab-bot" hidden>
+      <div class="panel-head">
+        <h1>Bot <span class="muted">/ simulateur (paper trading) — argent 100 % virtuel, pas un conseil</span></h1>
+        <span class="market-actions" id="bot-actions"></span>
+      </div>
+      <div id="bot-summary" class="bot-summary"></div>
+      <div id="bot-positions"></div>
+      <h2 class="alerts-log-title">Historique des trades</h2>
+      <div id="bot-history"></div>
+      <details class="bot-settings">
+        <summary>Réglages du bot</summary>
+        <div id="bot-config" class="filter-panel"></div>
+      </details>
     </section>
 
   </main>
@@ -3462,6 +3485,7 @@ document.getElementById("btn-market-enrich").addEventListener("click", enrichMar
 
 renderMarketResults(); // affichage initial depuis le cache existant (watchlist déjà analysée, etc.)
 loadMarketCache(); // repeuple le cache marché depuis IndexedDB (best-effort)
+if (bot.started) { setTimeout(() => runBot().catch(() => {}), 1500); } // laisse le cache marché se charger d'abord
 
 /* ============================= FILTRES & TRI — CÂBLAGE ============================= */
 
@@ -3610,6 +3634,7 @@ document.querySelectorAll(".tab").forEach(btn => {
     if (btn.dataset.tab === "positions") renderPositions();
     if (btn.dataset.tab === "analyse") renderAnalysis();
     if (btn.dataset.tab === "alerts") renderAlerts();
+    if (btn.dataset.tab === "bot") renderBot();
   });
 });
 
@@ -3701,9 +3726,120 @@ document.getElementById("alerts-list").addEventListener("change", e => {
 updateAlertFormOptions();
 renderAlerts();
 
+/* ============================= ONGLET 8 : BOT — UI ============================= */
+
+const BOT_CONFIG_FIELDS = [
+  ["capital", "Capital (€)", 100],
+  ["ticketPct", "Taille position (part du capital)", 0.01],
+  ["qualityMin", "Score d'achat mini", 1],
+  ["exitScore", "Score de sortie", 1],
+  ["stopVolFactor", "Facteur stop (×volatilité)", 0.05],
+  ["stopMin", "Stop min (%)", 1],
+  ["stopMax", "Stop max (%)", 1],
+  ["rrMin", "Ratio gain/risque min", 0.1],
+  ["rrMax", "Ratio gain/risque max", 0.1],
+];
+
+function botCurrentPrice(ticker, fallback) {
+  const e = cache[ticker] || marketCache[ticker];
+  return (e && e.ind && e.ind.price > 0) ? e.ind.price : fallback;
+}
+
+function renderBot() {
+  const actions = document.getElementById("bot-actions");
+  const summary = document.getElementById("bot-summary");
+  const posEl = document.getElementById("bot-positions");
+  const histEl = document.getElementById("bot-history");
+  const cfgEl = document.getElementById("bot-config");
+  if (!summary) return;
+
+  actions.innerHTML = bot.started
+    ? `<button class="btn btn-accent" id="btn-bot-run">Évaluer maintenant</button><button class="btn btn-ghost" id="btn-bot-reset">Réinitialiser</button>`
+    : `<button class="btn btn-accent" id="btn-bot-start">▶ Démarrer le bot</button>`;
+
+  if (!bot.started) {
+    summary.innerHTML = `<p class="analysis-empty">Le bot est à l'arrêt. Cliquez « Démarrer » : il investira ${fnum(bot.config.capital)} € virtuels dans les meilleurs titres de votre dernier scan marché, avec stop-loss et prise de bénéfice adaptatifs.</p>`;
+    posEl.innerHTML = ""; histEl.innerHTML = "";
+  } else {
+    const total = botPortfolioValue();
+    const perf = (total / bot.config.capital - 1) * 100;
+    const closed = bot.history.length;
+    const wins = bot.history.filter(h => h.pnl > 0).length;
+    const winRate = closed ? Math.round((wins / closed) * 100) : 0;
+    summary.innerHTML = `<dl class="impact-grid">
+      <div><dt>Valeur du portefeuille</dt><dd class="${pctClass(perf)}">${fnum(total)} €</dd></div>
+      <div><dt>Performance</dt><dd class="${pctClass(perf)}">${fpct(perf)}</dd></div>
+      <div><dt>Cash disponible</dt><dd>${fnum(bot.cash)} €</dd></div>
+      <div><dt>Positions ouvertes</dt><dd>${bot.positions.length}</dd></div>
+      <div><dt>Trades clôturés</dt><dd>${closed}</dd></div>
+      <div><dt>Trades gagnants</dt><dd>${winRate} %</dd></div>
+    </dl>
+    <p class="fund-caveat">Stops/cibles évalués sur les clôtures quotidiennes ; réévaluation au score courant. Simulation, pas un conseil.</p>`;
+
+    if (bot.positions.length === 0) {
+      posEl.innerHTML = `<p class="analysis-empty">Aucune position ouverte. Lancez/enrichissez un scan marché puis « Évaluer maintenant » pour que le bot achète.</p>`;
+    } else {
+      const rows = bot.positions.map(p => {
+        const price = botCurrentPrice(p.ticker, p.entryPrice);
+        const chg = (price / p.entryPrice - 1) * 100;
+        const stopP = p.entryPrice * (1 - p.stopPct / 100);
+        const tgtP = p.entryPrice * (1 + p.targetPct / 100);
+        const e = cache[p.ticker] || marketCache[p.ticker];
+        const score = (e && e.score != null) ? computeGlobalScore(e) : null;
+        return `<tr>
+          <td class="card-title"><span class="cell-ticker">${esc(p.ticker)}</span></td>
+          <td class="num" data-label="Achat">${fnum(p.entryPrice)}</td>
+          <td class="num" data-label="Cours">${fnum(price)}</td>
+          <td class="num ${pctClass(chg)}" data-label="+/−">${fpct(chg)}</td>
+          <td class="num" data-label="Stop">${fnum(stopP)}</td>
+          <td class="num" data-label="Cible">${fnum(tgtP)}</td>
+          <td class="num" data-label="Score">${score == null ? "—" : score}</td>
+          <td class="actions-col"><button class="btn btn-small btn-ghost btn-danger js-bot-sell" data-ticker="${esc(p.ticker)}">Vendre</button></td>
+        </tr>`;
+      }).join("");
+      posEl.innerHTML = `<div class="table-wrap"><table class="data-table"><thead><tr>
+        <th>Ticker</th><th class="num">Achat</th><th class="num">Cours</th><th class="num">+/−</th><th class="num">Stop</th><th class="num">Cible</th><th class="num">Score</th><th class="actions-col">Action</th>
+        </tr></thead><tbody>${rows}</tbody></table></div>`;
+    }
+
+    histEl.innerHTML = bot.history.length
+      ? `<div class="table-wrap"><table class="data-table"><thead><tr>
+          <th>Ticker</th><th class="num">Achat</th><th class="num">Vente</th><th class="num">P&L</th><th class="num">%</th><th>Raison</th>
+        </tr></thead><tbody>${bot.history.map(h => `<tr>
+          <td class="card-title"><span class="cell-ticker">${esc(h.ticker)}</span></td>
+          <td class="num" data-label="Achat">${fnum(h.entryPrice)}</td>
+          <td class="num" data-label="Vente">${fnum(h.exitPrice)}</td>
+          <td class="num ${pctClass(h.pnl)}" data-label="P&L">${fnum(h.pnl)} €</td>
+          <td class="num ${pctClass(h.pnlPct)}" data-label="%">${fpct(h.pnlPct)}</td>
+          <td data-label="Raison">${esc(h.reason)}</td>
+        </tr>`).join("")}</tbody></table></div>`
+      : `<p class="analysis-empty">Aucun trade clôturé pour l'instant.</p>`;
+  }
+
+  cfgEl.innerHTML = BOT_CONFIG_FIELDS.map(([k, label, step]) =>
+    `<label>${esc(label)} <input type="number" class="js-bot-cfg" data-key="${k}" step="${step}" value="${bot.config[k]}"></label>`
+  ).join("");
+}
+
+document.getElementById("panel-bot").addEventListener("click", e => {
+  if (e.target.id === "btn-bot-start") botStart();
+  else if (e.target.id === "btn-bot-run") { e.target.disabled = true; runBot().finally(() => renderBot()); }
+  else if (e.target.id === "btn-bot-reset") botReset();
+  else { const sell = e.target.closest(".js-bot-sell"); if (sell) botSellManual(sell.dataset.ticker); }
+});
+document.getElementById("panel-bot").addEventListener("change", e => {
+  const inp = e.target.closest(".js-bot-cfg");
+  if (inp) {
+    const v = Number(inp.value);
+    if (isFinite(v)) { bot.config[inp.dataset.key] = v; saveBot(); }
+  }
+});
+
+renderBot();
+
 // Raccourcis clavier F1–F4 façon terminal (sans bloquer si un champ est actif)
 document.addEventListener("keydown", e => {
-  const map = { F1: "dashboard", F2: "positions", F3: "buysim", F4: "analyse", F5: "marche", F6: "allocation", F7: "alerts" };
+  const map = { F1: "dashboard", F2: "positions", F3: "buysim", F4: "analyse", F5: "marche", F6: "allocation", F7: "alerts", F8: "bot" };
   if (map[e.key]) {
     e.preventDefault();
     document.getElementById("tab-" + map[e.key]).click();
