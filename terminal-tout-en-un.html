@@ -1339,6 +1339,124 @@ function botPositionAmount(score, cfg, cash) {
   return Math.min(weighted, cash);
 }
 
+// Cherche le 1er jour (chronologique) après l'achat où le stop ou la cible est franchi (sur clôtures).
+function botFindExit(pos, e) {
+  if (!e || !e.hist || !Array.isArray(e.hist.closes) || !Array.isArray(e.hist.dates)) return null;
+  const stopLevel = pos.entryPrice * (1 - pos.stopPct / 100);
+  const targetLevel = pos.entryPrice * (1 + pos.targetPct / 100);
+  const { dates, closes } = e.hist; // du plus récent au plus ancien → on parcourt à l'envers
+  for (let i = dates.length - 1; i >= 0; i--) {
+    if (dates[i] <= pos.entryDate) continue;
+    const c = closes[i];
+    if (c == null || !isFinite(c)) continue;
+    if (c <= stopLevel) return { price: c, date: dates[i], reason: "stop-loss" };
+    if (c >= targetLevel) return { price: c, date: dates[i], reason: "prise de bénéfice" };
+  }
+  return null;
+}
+
+// Valeur totale du portefeuille virtuel (cash + positions au cours courant).
+function botPortfolioValue() {
+  let v = bot.cash;
+  for (const pos of bot.positions) {
+    const e = cache[pos.ticker] || marketCache[pos.ticker];
+    const price = (e && e.ind && e.ind.price > 0) ? e.ind.price : pos.entryPrice;
+    v += pos.qty * price;
+  }
+  return v;
+}
+
+// Vente manuelle immédiate au cours courant.
+function botSellManual(ticker) {
+  const idx = bot.positions.findIndex(p => p.ticker === ticker);
+  if (idx < 0) return;
+  const pos = bot.positions[idx];
+  const e = cache[ticker] || marketCache[ticker];
+  const price = (e && e.ind && e.ind.price > 0) ? e.ind.price : pos.entryPrice;
+  bot.cash += pos.qty * price;
+  bot.history.unshift({ ticker, entryDate: pos.entryDate, entryPrice: pos.entryPrice,
+    exitDate: new Date().toISOString().slice(0, 10), exitPrice: price, qty: pos.qty,
+    pnl: (price - pos.entryPrice) * pos.qty, pnlPct: (price / pos.entryPrice - 1) * 100, reason: "manuelle" });
+  bot.positions.splice(idx, 1);
+  saveBot();
+  if (typeof renderBot === "function") renderBot();
+}
+
+// Moteur : rafraîchit les positions, applique les sorties (rejeu clôtures + réévaluation), puis achète.
+async function runBot() {
+  if (!bot.started) return;
+  const cfg = bot.config;
+  const today = new Date().toISOString().slice(0, 10);
+
+  // a) rafraîchir les positions détenues (best-effort, ≤ N requêtes)
+  for (const pos of bot.positions) {
+    const e = cache[pos.ticker] || marketCache[pos.ticker];
+    if (!e || isStale(e)) {
+      try { await analyzeTicker(pos.ticker, null, { silent: true, skipRender: true, store: cache[pos.ticker] ? cache : marketCache }); }
+      catch (_) { /* on évalue avec ce qu'on a */ }
+    }
+  }
+
+  // b) sorties
+  const stillOpen = [];
+  for (const pos of bot.positions) {
+    const e = cache[pos.ticker] || marketCache[pos.ticker];
+    let exit = e ? botFindExit(pos, e) : null;
+    if (!exit && e && e.ind) {
+      const g = e.score != null ? computeGlobalScore(e) : null;
+      if ((g != null && g <= cfg.exitScore) || e.signal === "Vente") {
+        exit = { price: e.ind.price, date: today, reason: "réévaluation" };
+      }
+    }
+    if (exit && isFinite(exit.price) && exit.price > 0) {
+      bot.cash += pos.qty * exit.price;
+      bot.history.unshift({ ticker: pos.ticker, entryDate: pos.entryDate, entryPrice: pos.entryPrice,
+        exitDate: exit.date, exitPrice: exit.price, qty: pos.qty,
+        pnl: (exit.price - pos.entryPrice) * pos.qty, pnlPct: (exit.price / pos.entryPrice - 1) * 100, reason: exit.reason });
+    } else {
+      stillOpen.push(pos);
+    }
+  }
+  bot.positions = stillOpen;
+
+  // c) entrées : déployer le capital, sans limite de nombre
+  const held = new Set(bot.positions.map(p => p.ticker));
+  const base = cfg.capital * cfg.ticketPct;
+  const candidates = Object.keys(marketCache)
+    .map(t => ({ t, e: marketCache[t] }))
+    .filter(x => x.e && x.e.ind && x.e.ind.price > 0 && !held.has(x.t) && x.e.score != null && computeGlobalScore(x.e) >= cfg.qualityMin)
+    .sort((a, b) => computeGlobalScore(b.e) - computeGlobalScore(a.e));
+  for (const cand of candidates) {
+    if (bot.cash < 0.2 * base) break;
+    const score = computeGlobalScore(cand.e), ind = cand.e.ind;
+    const amount = botPositionAmount(score, cfg, bot.cash);
+    if (amount < 1) break;
+    bot.cash -= amount;
+    bot.positions.push({ ticker: cand.t, entryDate: today, entryPrice: ind.price, qty: amount / ind.price,
+      stopPct: botStopPct(ind, cfg), targetPct: botTargetPct(ind, score, cfg), entryScore: score });
+    held.add(cand.t);
+  }
+
+  if (bot.history.length > 200) bot.history = bot.history.slice(0, 200);
+  saveBot();
+  if (typeof renderBot === "function") renderBot();
+}
+
+function botStart() {
+  bot.started = true; bot.startDate = new Date().toISOString();
+  bot.cash = bot.config.capital; bot.positions = []; bot.history = [];
+  saveBot();
+  if (typeof renderBot === "function") renderBot();
+  runBot();
+}
+function botReset() {
+  if (!window.confirm("Réinitialiser le bot ? Positions et historique seront effacés.")) return;
+  bot.started = false; bot.startDate = null;
+  bot.cash = bot.config.capital; bot.positions = []; bot.history = [];
+  saveBot();
+  if (typeof renderBot === "function") renderBot();
+}
+
 /* ============================= HELPERS localStorage ============================= */
 
 // Toutes les clés sont automatiquement scopées au profil actif (voir section PROFILS
