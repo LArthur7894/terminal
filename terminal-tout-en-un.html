@@ -390,7 +390,6 @@ th.sortable:hover { color: var(--amber); }
 /* ============================= POSITIONS ============================= */
 
 .cur-badge { display: inline-block; margin-left: 6px; padding: 1px 5px; font-size: 10px; border-radius: 3px; background: var(--bg-raised); color: var(--text-dim); border: 1px solid #2a3340; }
-.cur-badge.cur-unknown { color: #ff4d4d; border-color: #5a2a2a; }
 
 .base-cur-label { font-size: 12px; color: var(--text-dim); display: inline-flex; align-items: center; gap: 6px; }
 .base-cur-select { font-family: inherit; font-size: 12px; background: var(--bg-raised); color: var(--text); border: 1px solid #2a3340; border-radius: 4px; padding: 4px 6px; }
@@ -2713,7 +2712,7 @@ function currencySymbol(code) { return CURRENCY_SYMBOLS[code] || code || ""; }
 // ok=false si la devise est inconnue ou le taux indisponible → agrégat marqué dégradé.
 function convertToBase(amount, fromCur) {
   const base = getBaseCurrency();
-  if (!fromCur) return { value: null, ok: false };      // devise inconnue
+  if (!fromCur) return { value: amount, ok: true };     // devise inconnue → supposée en devise de réf. (incluse ; marqueur discret sur la ligne)
   if (fromCur === base) return { value: amount, ok: true };
   const r = fxRateCached(fromCur, base);
   if (r === null) return { value: null, ok: false };    // taux pas encore chargé
@@ -2756,7 +2755,7 @@ function renderPositions() {
     const noCache = !cache[pos.ticker];
     const curBadge = cur && cur !== base
       ? `<span class="cur-badge" title="Cours en ${cur}">${esc(cur)}</span>`
-      : (!cur ? `<span class="cur-badge cur-unknown" title="Devise inconnue (jamais analysé) — supposée exclue du total">?</span>` : "");
+      : (!cur ? `<span class="cur-badge" title="Devise inconnue (jamais analysé) — supposée en devise de référence ; analysez la valeur pour la convertir au taux réel">?</span>` : "");
 
     const tr = document.createElement("tr");
     tr.innerHTML = `
@@ -2923,7 +2922,7 @@ function renderAllocationChart() {
   const colors = ["#ffb000", "#2ecc71", "#4aa8ff", "#ff4d4d", "#b87f0a", "#9b59b6", "#1abc9c", "#e67e22"];
 
   if (allocationChart) allocationChart.destroy();
-  if (positions.length === 0) return;
+  if (conv.length === 0) return;
 
   allocationChart = new Chart(canvas, {
     type: "pie",
