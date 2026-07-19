@@ -142,6 +142,7 @@ def _normalize_fundamentals(sym, node):
         "quickRatio": _pick(fin, "quickRatio"),
         "dividendYield": _pick(summary, "dividendYield"),
         "payoutRatio": _pick(summary, "payoutRatio"),
+        "dividendRate": _pick(summary, "dividendRate") or _pick(summary, "trailingAnnualDividendRate"),
         "recommendationKey": rec if isinstance(rec, str) else None,
         "targetMeanPrice": _pick(fin, "targetMeanPrice"),
     }

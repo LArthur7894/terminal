@@ -77,6 +77,22 @@ class TestNormalizeFundamentals(unittest.TestCase):
         self.assertIsNone(server._pick({}, "x"))
         self.assertIsNone(server._pick({"x": None}, "x"))
 
+    def test_dividend_rate_extracted(self):
+        node = self._sample_node()
+        node["summaryDetail"]["dividendRate"] = {"raw": 0.96, "fmt": "0.96"}
+        out = server._normalize_fundamentals("AAPL", node)
+        self.assertEqual(out["dividendRate"], 0.96)
+
+    def test_dividend_rate_fallback_and_absent(self):
+        # repli sur trailingAnnualDividendRate quand dividendRate absent
+        node = self._sample_node()
+        node["summaryDetail"]["trailingAnnualDividendRate"] = {"raw": 0.9, "fmt": "0.90"}
+        out = server._normalize_fundamentals("AAPL", node)
+        self.assertEqual(out["dividendRate"], 0.9)
+        # absent des deux → None
+        out2 = server._normalize_fundamentals("MC.PA", {"price": {"currency": "EUR"}})
+        self.assertIsNone(out2["dividendRate"])
+
 
 if __name__ == "__main__":
     unittest.main()
