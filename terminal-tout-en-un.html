@@ -2682,7 +2682,12 @@ if (!Array.isArray(perfJournal)) perfJournal = [];
 function recordPerfSnapshot() {
   if (!Array.isArray(perfJournal)) perfJournal = [];
   if (positions.length === 0) return;
-  const value = positions.reduce((s, p) => s + p.qty * refPrice(p), 0);
+  let value = 0;
+  for (const p of positions) {
+    const c = positionValueBase(p);
+    if (!c.ok) return;            // au moins une position non convertible → on saute ce jour
+    value += c.value;
+  }
   if (!isFinite(value) || value <= 0) return;
   const today = new Date().toISOString().slice(0, 10);
   const last = perfJournal[perfJournal.length - 1];
@@ -2907,8 +2912,12 @@ function renderAllocationChart() {
   const canvas = document.getElementById("allocation-chart");
   if (!canvas || typeof Chart === "undefined") return;
 
-  const labels = positions.map(p => p.ticker);
-  const values = positions.map(p => p.qty * refPrice(p));
+  const base = getBaseCurrency();
+  const conv = positions
+    .map(p => ({ ticker: p.ticker, c: positionValueBase(p) }))
+    .filter(x => x.c.ok && isFinite(x.c.value) && x.c.value > 0);
+  const labels = conv.map(x => x.ticker);
+  const values = conv.map(x => x.c.value);
 
   // Palette dérivée du thème
   const colors = ["#ffb000", "#2ecc71", "#4aa8ff", "#ff4d4d", "#b87f0a", "#9b59b6", "#1abc9c", "#e67e22"];
@@ -2937,7 +2946,7 @@ function renderAllocationChart() {
         },
         tooltip: {
           callbacks: {
-            label: ctx => ` ${ctx.label} : ${fmtNum.format(ctx.parsed)} (${fmtNum.format(ctx.parsed / values.reduce((a, b) => a + b, 0) * 100)} %)`,
+            label: ctx => ` ${ctx.label} : ${fmtNum.format(ctx.parsed)} ${currencySymbol(base)} (${fmtNum.format(ctx.parsed / values.reduce((a, b) => a + b, 0) * 100)} %)`,
           },
         },
       },
