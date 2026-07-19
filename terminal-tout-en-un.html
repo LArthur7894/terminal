@@ -506,6 +506,10 @@ th.sortable:hover { color: var(--amber); }
 .fund-pillar-bar > span { display: block; height: 100%; background: var(--amber); }
 .fund-pillar-val { text-align: right; color: var(--text-dim); font-family: var(--mono); }
 .fund-metrics { margin-top: 10px; }
+.fund-dividend { margin: 10px 0; padding: 10px 12px; background: var(--bg-raised); border: 1px solid var(--border); border-radius: 6px; }
+.fund-dividend-title { font-size: 13px; margin: 0 0 8px; color: var(--text); }
+.fund-dividend-none { color: var(--text-dim); font-size: 13px; margin: 0; }
+.fund-dividend-sust { font-size: 12px; color: var(--text-dim); margin: 6px 0 0; }
 .fund-caveat { font-size: 10px; color: var(--text-dim); margin-top: 8px; font-style: italic; }
 
 .analysis-container { display: grid; gap: 14px; }
@@ -3175,6 +3179,17 @@ function fmtMarketCap(v, currency) {
 // Affiche une fraction (0.253) en pourcentage (25,3 %). null → "—".
 function ffrac(v) { return v === null || v === undefined || !isFinite(v) ? "—" : fpct(v * 100); }
 
+// Lecture qualitative de la soutenabilité du dividende à partir du taux de distribution.
+// payout = fraction (0.45 = 45 %). Renvoie null si non calculable.
+function dividendSustainability(payout) {
+  if (payout == null || !isFinite(payout)) return null;
+  if (payout < 0) return "tendu (bénéfices négatifs)";
+  if (payout < 0.40) return "largement couvert, marge de croissance";
+  if (payout < 0.60) return "confortable";
+  if (payout < 0.80) return "à surveiller";
+  return "tendu, potentiellement non soutenable";
+}
+
 // Bloc fondamental complet pour une carte d'analyse.
 function buildFundamentalStatsHtml(entry) {
   const f = entry.fund, fs = entry.fundScore;
@@ -3196,7 +3211,6 @@ function buildFundamentalStatsHtml(entry) {
     ["Croissance bénéf.", ffrac(f.earningsGrowth), pctClass(f.earningsGrowth)],
     ["Dette / capitaux propres", f.debtToEquity === null ? "—" : fnum(f.debtToEquity / 100), ""],
     ["Ratio de liquidité", fnum(f.currentRatio), ""],
-    ["Rendement dividende", ffrac(f.dividendYield), ""],
   ];
   const grid = `<dl class="impact-grid fund-metrics">`
     + metrics.map(([k, v, cls]) => `<div><dt>${esc(k)}</dt><dd class="${cls}">${esc(v)}</dd></div>`).join("")
@@ -3212,6 +3226,28 @@ function buildFundamentalStatsHtml(entry) {
       + `<span class="fund-pillar-val">${esc(disp)}</span></div>`;
   }).join("");
 
+  // --- Bloc dividende dédié ---
+  const paysDividend = (f.dividendYield != null && isFinite(f.dividendYield) && f.dividendYield > 0)
+                    || (f.dividendRate != null && isFinite(f.dividendRate) && f.dividendRate > 0);
+  let dividendBlock;
+  if (!paysDividend) {
+    dividendBlock = `<div class="fund-dividend"><h3 class="fund-dividend-title">💸 Dividende</h3>`
+      + `<p class="fund-dividend-none">Ne verse pas de dividende.</p></div>`;
+  } else {
+    const sust = dividendSustainability(f.payoutRatio);
+    const amount = (f.dividendRate != null && isFinite(f.dividendRate))
+      ? fnum(f.dividendRate) + (f.currency ? " " + esc(f.currency) : "")
+      : "—";
+    dividendBlock = `<div class="fund-dividend"><h3 class="fund-dividend-title">💸 Dividende</h3>`
+      + `<dl class="impact-grid fund-dividend-grid">`
+      + `<div><dt>Rendement</dt><dd>${ffrac(f.dividendYield)}</dd></div>`
+      + `<div><dt>Taux de distribution</dt><dd>${ffrac(f.payoutRatio)}</dd></div>`
+      + `<div><dt>Montant annuel / action</dt><dd>${amount}</dd></div>`
+      + `</dl>`
+      + (sust ? `<p class="fund-dividend-sust">Soutenabilité : ${esc(sust)}.</p>` : "")
+      + `</div>`;
+  }
+
   const global = computeGlobalScore(entry);
   return `<div class="fund-block">
     <div class="fund-scores">
@@ -3219,6 +3255,7 @@ function buildFundamentalStatsHtml(entry) {
       <div class="fund-score-badge fund-score-global"><span class="fund-score-num">${global}</span><span class="fund-score-cap">Score global /100</span><span class="fund-verdict">${Math.round(weightTech*100)}% tech / ${Math.round((1-weightTech)*100)}% fonda</span></div>
     </div>
     ${pillars}
+    ${dividendBlock}
     ${grid}
     <p class="fund-caveat">Seuils de valorisation absolus, non ajustés par secteur : à interpréter avec le contexte du secteur. Analyse descriptive, pas un conseil.</p>
   </div>`;
@@ -3241,8 +3278,12 @@ function buildFundamentalText(fund, fundScore) {
   const healthBits = [];
   if (f.debtToEquity !== null) healthBits.push(`dette/capitaux propres ${fnum(f.debtToEquity / 100)}`);
   if (f.currentRatio !== null) healthBits.push(`ratio de liquidité ${fnum(f.currentRatio)}`);
-  if (f.dividendYield !== null) healthBits.push(`rendement du dividende ${ffrac(f.dividendYield)}`);
   if (healthBits.length) parts.push(`Santé financière : ${healthBits.join(", ")}. Note de santé : ${fundScore.pillars.health ?? "—"}/100.`);
+  const paysDiv = (f.dividendYield !== null && f.dividendYield > 0) || (f.dividendRate != null && f.dividendRate > 0);
+  if (paysDiv) {
+    const sustText = dividendSustainability(f.payoutRatio);
+    parts.push(`Dividende : rendement ${ffrac(f.dividendYield)}, distribution ${ffrac(f.payoutRatio)}${sustText ? `, soutenabilité ${sustText}` : ""}.`);
+  }
   parts.push(`Score fondamental global : ${fundScore.total}/100 → « ${fundScore.verdict} ». Agrégation pondérée des piliers disponibles (valorisation 35 %, rentabilité 30 %, croissance 20 %, santé 15 %).`);
   return parts;
 }
