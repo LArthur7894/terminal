@@ -2794,13 +2794,18 @@ function renderPositions() {
   const totalPnlPct = totalCost > 0 ? (totalPnl / totalCost) * 100 : 0;
   const sym = currencySymbol(base);
   const suffix = degraded ? ` ${sym} ⚠` : ` ${sym}`;
+  const degradedTitle = degraded
+    ? "Certaines positions n'ont pas pu être converties (devise inconnue ou taux indisponible) et sont exclues du total."
+    : "";
   const elVal = document.getElementById("total-value");
   elVal.textContent = fnum(totalValue) + suffix;
-  elVal.title = degraded ? "Certaines positions n'ont pas pu être converties (devise inconnue ou taux indisponible) et sont exclues du total." : "";
+  elVal.title = degradedTitle;
   const elPnl = document.getElementById("total-pnl");
   const elPct = document.getElementById("total-pnl-pct");
-  elPnl.textContent = fnum(totalPnl) + " " + sym;
-  elPct.textContent = fpct(totalPnlPct);
+  elPnl.textContent = fnum(totalPnl) + suffix;
+  elPct.textContent = fpct(totalPnlPct) + (degraded ? " ⚠" : "");
+  elPnl.title = degradedTitle;
+  elPct.title = degradedTitle;
   elPnl.className = "num " + pctClass(totalPnl);
   elPct.className = "num " + pctClass(totalPnl);
 
