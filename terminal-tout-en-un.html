@@ -389,6 +389,9 @@ th.sortable:hover { color: var(--amber); }
 
 /* ============================= POSITIONS ============================= */
 
+.base-cur-label { font-size: 12px; color: var(--text-dim); display: inline-flex; align-items: center; gap: 6px; }
+.base-cur-select { font-family: inherit; font-size: 12px; background: var(--bg-raised); color: var(--text); border: 1px solid #2a3340; border-radius: 4px; padding: 4px 6px; }
+
 .positions-layout {
   display: grid;
   grid-template-columns: minmax(0, 1.6fr) minmax(260px, 1fr);
@@ -807,6 +810,17 @@ th.sortable:hover { color: var(--amber); }
     <section class="panel" id="panel-positions" role="tabpanel" aria-labelledby="tab-positions" hidden>
       <div class="panel-head">
         <h1>Mes positions</h1>
+        <label class="base-cur-label" for="base-currency">Devise de réf.
+          <select id="base-currency" class="base-cur-select" aria-label="Devise de référence du portefeuille">
+            <option value="EUR">EUR €</option>
+            <option value="USD">USD $</option>
+            <option value="GBP">GBP £</option>
+            <option value="CHF">CHF</option>
+            <option value="CAD">CAD $</option>
+            <option value="JPY">JPY ¥</option>
+            <option value="AUD">AUD $</option>
+          </select>
+        </label>
         <form class="inline-form" id="form-add-position">
           <div class="autocomplete-wrap">
             <label class="sr-only" for="pos-ticker">Entreprise ou ticker</label>
@@ -3811,7 +3825,7 @@ document.querySelectorAll(".tab").forEach(btn => {
       p.hidden = !active;
     });
     // Certains rendus dépendent de la visibilité (Chart.js notamment)
-    if (btn.dataset.tab === "positions") renderPositions();
+    if (btn.dataset.tab === "positions") { renderPositions(); ensureFxRates(); }
     if (btn.dataset.tab === "analyse") renderAnalysis();
     if (btn.dataset.tab === "alerts") renderAlerts();
     if (btn.dataset.tab === "bot") renderBot();
@@ -4273,6 +4287,18 @@ document.getElementById("form-settings").addEventListener("submit", () => {
   renderAll();
 });
 
+/* ============================= DEVISE DE RÉFÉRENCE ============================= */
+(function initBaseCurrency() {
+  const sel = document.getElementById("base-currency");
+  if (!sel) return;
+  sel.value = getBaseCurrency();
+  sel.addEventListener("change", () => {
+    lsSet(LS.baseCurrency, sel.value);
+    ensureFxRates();   // pré-charge les taux de la nouvelle devise
+    renderAll();       // recalcul immédiat (état dégradé si taux pas encore là)
+  });
+})();
+
 /* ============================= RENDU GLOBAL ============================= */
 
 function renderAll() {
@@ -4289,6 +4315,7 @@ function renderAll() {
 /* ============================= INITIALISATION ============================= */
 
 renderAll();
+ensureFxRates(); // pré-charge les taux dès le démarrage si le portefeuille est multi-devises
 
 // Rattrapage best-effort des noms manquants pour des tickers déjà en watchlist
 // (ajoutés avant cette fonctionnalité, ou tapés à la main sans passer par la recherche).
