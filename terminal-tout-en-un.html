@@ -3955,6 +3955,30 @@ const MONDE_ALL_SYMBOLS = [
 let mondeCache = {};        // { SYMBOL: {last, changePct} }, mémoire uniquement
 let mondeUpdated = null;    // Date du dernier chargement réussi
 let mondeLoading = false;
+let mondeNews = null;       // [{title, link, publisher, date}] fusionnés, ou null si pas encore chargé
+const MONDE_NEWS_SYMBOLS = ["^GSPC", "^IXIC", "^DJI"];
+
+// "dd/mm/yyyy" -> timestamp (0 si absent/illisible), pour trier les actus par date décroissante.
+function parseFrDate(s) {
+  if (!s) return 0;
+  const p = String(s).split("/").map(Number);
+  if (p.length !== 3 || p.some(n => !isFinite(n))) return 0;
+  return new Date(p[2], p[1] - 1, p[0]).getTime();
+}
+
+async function loadMondeNews() {
+  await runPool(MONDE_NEWS_SYMBOLS, loadNews, 3); // remplit newsCache[sym] via la fonction existante
+  const seen = new Set(), merged = [];
+  for (const sym of MONDE_NEWS_SYMBOLS) {
+    for (const n of (newsCache[sym] || [])) {
+      if (!n.title || seen.has(n.title)) continue;
+      seen.add(n.title);
+      merged.push(n);
+    }
+  }
+  merged.sort((a, b) => parseFrDate(b.date) - parseFrDate(a.date));
+  mondeNews = merged.slice(0, 12);
+}
 
 // Variation du jour en % depuis [clôture la plus récente, précédente, ...]. null si non calculable.
 function mondeChangePct(closes) {
@@ -3980,14 +4004,25 @@ async function loadMondeData() {
   mondeLoading = true;
   renderMonde();
   await runPool(MONDE_ALL_SYMBOLS, async sym => { mondeCache[sym] = await fetchMondeQuote(sym); }, 6);
+  await loadMondeNews();
   mondeUpdated = new Date();
   mondeLoading = false;
   renderMonde();
 }
 
-// Stubs remplis aux tâches 2 et 3.
-function renderMondeNews() { return ""; }
+// Stub rempli à la tâche 3.
 function mondeImpactHtml(key) { return ""; }
+
+function renderMondeNews() {
+  if (mondeNews == null) return `<p class="hint">Chargement des actualités…</p>`;
+  if (mondeNews.length === 0) return `<p class="hint">Aucune actualité récente disponible.</p>`;
+  const rows = mondeNews.map(n => `
+    <li>
+      <a href="${esc(n.link)}" target="_blank" rel="noopener">${esc(n.title)}</a>
+      <span class="muted">${esc(n.publisher || "")}${n.date ? " · " + esc(n.date) : ""}</span>
+    </li>`).join("");
+  return `<ul class="news-list">${rows}</ul>`;
+}
 
 function mondeCell(item) {
   const q = mondeCache[item.sym];
