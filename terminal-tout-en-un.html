@@ -548,6 +548,18 @@ th.sortable:hover { color: var(--amber); }
 .news-list a:hover { text-decoration: underline; }
 .news-list .muted { display: block; margin-top: 2px; font-size: 11px; }
 
+/* ============================= ONGLET MONDE ============================= */
+.monde-head { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
+.monde-group { margin: 0 0 18px; }
+.monde-group-title { font-size: 12px; text-transform: uppercase; letter-spacing: 1px; color: var(--amber); margin: 0 0 6px; border-top: 1px solid var(--border); padding-top: 10px; }
+.monde-why { font-size: 12px; color: var(--text-dim); margin: 0 0 8px; }
+.monde-impact-live { font-size: 12px; color: var(--text); margin: 0 0 8px; font-weight: 600; }
+.monde-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 8px; }
+.monde-cell { display: flex; flex-direction: column; gap: 2px; padding: 8px 10px; background: var(--bg-raised); border: 1px solid var(--border); border-radius: 6px; }
+.monde-name { font-size: 11px; color: var(--text-dim); }
+.monde-val { font-size: 15px; font-family: var(--mono); color: var(--text); }
+.monde-chg { font-size: 12px; font-family: var(--mono); }
+
 /* ============================= DISCLAIMER ============================= */
 
 .disclaimer {
@@ -729,6 +741,7 @@ th.sortable:hover { color: var(--amber); }
       <button class="tab" role="tab" aria-selected="false" aria-controls="panel-alerts" id="tab-alerts" data-tab="alerts">F7 · ALERTES</button>
       <button class="tab" role="tab" aria-selected="false" aria-controls="panel-bot" id="tab-bot" data-tab="bot">F8 · BOT</button>
       <button class="tab" role="tab" aria-selected="false" aria-controls="panel-compare" id="tab-compare" data-tab="compare">F9 · COMPARER</button>
+      <button class="tab" role="tab" aria-selected="false" aria-controls="panel-monde" id="tab-monde" data-tab="monde">F10 · MONDE</button>
     </nav>
   </header>
 
@@ -1062,6 +1075,14 @@ th.sortable:hover { color: var(--amber); }
       <div id="compare-periods" class="chart-periods" role="tablist"></div>
       <div class="chart-holder"><canvas id="compare-canvas"></canvas></div>
       <div id="compare-table"></div>
+    </section>
+
+    <!-- ======================= ONGLET 10 : MONDE ======================= -->
+    <section class="panel" id="panel-monde" role="tabpanel" aria-labelledby="tab-monde" hidden>
+      <div class="panel-head">
+        <h1>Monde <span class="muted">/ macro & actualité — repères pour l'entretien</span></h1>
+      </div>
+      <div id="monde-body"></div>
     </section>
 
   </main>
@@ -3905,6 +3926,110 @@ function applyAllocation() {
     `<p class="analysis-empty">Répartition appliquée. Relancez une simulation si besoin.</p>`;
 }
 
+/* ============================= ONGLET MONDE ============================= */
+
+const MONDE_GROUPS = [
+  { key: "indices", label: "Indices", items: [
+    { sym: "^GSPC", name: "S&P 500" }, { sym: "^IXIC", name: "Nasdaq" }, { sym: "^DJI", name: "Dow Jones" },
+    { sym: "^FCHI", name: "CAC 40" }, { sym: "^GDAXI", name: "DAX" }, { sym: "^FTSE", name: "FTSE 100" }, { sym: "^N225", name: "Nikkei 225" } ] },
+  { key: "taux", label: "Taux & volatilité", items: [
+    { sym: "^TNX", name: "US 10 ans" }, { sym: "^VIX", name: "VIX" } ] },
+  { key: "devises", label: "Devises", items: [
+    { sym: "EURUSD=X", name: "EUR/USD" }, { sym: "USDJPY=X", name: "USD/JPY" }, { sym: "DX-Y.NYB", name: "Indice dollar" } ] },
+  { key: "matieres", label: "Matières premières", items: [
+    { sym: "CL=F", name: "Pétrole WTI" }, { sym: "GC=F", name: "Or" } ] },
+  { key: "crypto", label: "Crypto", items: [
+    { sym: "BTC-USD", name: "Bitcoin" } ] },
+];
+const MONDE_SECTORS = [
+  { sym: "XLK", name: "Technologie" }, { sym: "XLE", name: "Énergie" }, { sym: "XLF", name: "Finance" },
+  { sym: "XLV", name: "Santé" }, { sym: "XLY", name: "Conso discrétionnaire" }, { sym: "XLP", name: "Conso de base" },
+  { sym: "XLI", name: "Industrie" }, { sym: "XLU", name: "Services publics" }, { sym: "XLB", name: "Matériaux" },
+  { sym: "XLRE", name: "Immobilier" }, { sym: "XLC", name: "Communication" },
+];
+const MONDE_ALL_SYMBOLS = [
+  ...MONDE_GROUPS.flatMap(g => g.items.map(i => i.sym)),
+  ...MONDE_SECTORS.map(s => s.sym),
+];
+
+let mondeCache = {};        // { SYMBOL: {last, changePct} }, mémoire uniquement
+let mondeUpdated = null;    // Date du dernier chargement réussi
+let mondeLoading = false;
+
+// Variation du jour en % depuis [clôture la plus récente, précédente, ...]. null si non calculable.
+function mondeChangePct(closes) {
+  if (!Array.isArray(closes) || closes.length < 2) return null;
+  const c0 = Number(closes[0]), c1 = Number(closes[1]);
+  if (!isFinite(c0) || !isFinite(c1) || c1 === 0) return null;
+  return (c0 - c1) / c1 * 100;
+}
+
+async function fetchMondeQuote(sym) {
+  try {
+    const resp = await fetch("/api/history?symbol=" + encodeURIComponent(sym));
+    const data = await resp.json();
+    if (data.error || !Array.isArray(data.closes) || data.closes.length < 2) return { last: null, changePct: null };
+    return { last: Number(data.closes[0]), changePct: mondeChangePct(data.closes) };
+  } catch {
+    return { last: null, changePct: null };
+  }
+}
+
+async function loadMondeData() {
+  if (mondeLoading) return;
+  mondeLoading = true;
+  renderMonde();
+  await runPool(MONDE_ALL_SYMBOLS, async sym => { mondeCache[sym] = await fetchMondeQuote(sym); }, 6);
+  mondeUpdated = new Date();
+  mondeLoading = false;
+  renderMonde();
+}
+
+// Stubs remplis aux tâches 2 et 3.
+function renderMondeNews() { return ""; }
+function mondeImpactHtml(key) { return ""; }
+
+function mondeCell(item) {
+  const q = mondeCache[item.sym];
+  const last = q && q.last != null ? fnum(q.last) : "—";
+  const chg = q && q.changePct != null ? fpct(q.changePct) : "—";
+  const cls = q && q.changePct != null ? pctClass(q.changePct) : "";
+  return `<div class="monde-cell"><span class="monde-name">${esc(item.name)}</span>`
+    + `<span class="monde-val">${last}</span>`
+    + `<span class="monde-chg ${cls}">${chg}</span></div>`;
+}
+
+function renderMonde() {
+  const panel = document.getElementById("monde-body");
+  if (!panel) return;
+
+  const groupsHtml = MONDE_GROUPS.map(g =>
+    `<section class="monde-group"><h2 class="monde-group-title">${esc(g.label)}</h2>`
+    + mondeImpactHtml(g.key)
+    + `<div class="monde-grid">${g.items.map(mondeCell).join("")}</div></section>`
+  ).join("");
+
+  // Rotation sectorielle : triée du plus fort au plus faible du jour (indisponibles en fin).
+  const sectors = MONDE_SECTORS
+    .map(s => ({ item: s, chg: (mondeCache[s.sym] || {}).changePct }))
+    .sort((a, b) => (b.chg ?? -Infinity) - (a.chg ?? -Infinity));
+  const sectorsHtml = `<section class="monde-group"><h2 class="monde-group-title">Rotation sectorielle</h2>`
+    + mondeImpactHtml("sectors")
+    + `<div class="monde-grid">${sectors.map(s => mondeCell(s.item)).join("")}</div></section>`;
+
+  const updated = mondeUpdated ? mondeUpdated.toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" }) : "—";
+  const status = mondeLoading ? "Chargement…" : `Mis à jour : ${updated}`;
+
+  panel.innerHTML =
+    `<div class="monde-head"><button class="btn btn-small btn-ghost" id="btn-monde-refresh"${mondeLoading ? " disabled" : ""}>↻ Rafraîchir</button>`
+    + `<span class="hint">${esc(status)}</span></div>`
+    + groupsHtml + sectorsHtml
+    + `<section class="monde-group"><h2 class="monde-group-title">Actualité monde</h2>${renderMondeNews()}</section>`;
+
+  const btn = document.getElementById("btn-monde-refresh");
+  if (btn) btn.addEventListener("click", () => { if (!mondeLoading) loadMondeData(); });
+}
+
 /* ============================= NAVIGATION PAR ONGLETS ============================= */
 
 document.querySelectorAll(".tab").forEach(btn => {
@@ -3924,6 +4049,7 @@ document.querySelectorAll(".tab").forEach(btn => {
     if (btn.dataset.tab === "alerts") renderAlerts();
     if (btn.dataset.tab === "bot") renderBot();
     if (btn.dataset.tab === "compare") renderCompare();
+    if (btn.dataset.tab === "monde") { renderMonde(); if (!mondeUpdated && !mondeLoading) loadMondeData(); }
   });
 });
 
