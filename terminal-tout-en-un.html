@@ -2709,7 +2709,8 @@ const CURRENCY_SYMBOLS = { EUR: "€", USD: "$", GBP: "£", CHF: "CHF", CAD: "C$
 function currencySymbol(code) { return CURRENCY_SYMBOLS[code] || code || ""; }
 
 // Convertit un montant depuis fromCur vers la devise de référence.
-// ok=false si la devise est inconnue ou le taux indisponible → agrégat marqué dégradé.
+// Devise inconnue (jamais analysée) → supposée en devise de réf. et incluse.
+// ok=false seulement si le taux d'une devise connue n'est pas encore chargé → agrégat marqué dégradé.
 function convertToBase(amount, fromCur) {
   const base = getBaseCurrency();
   if (!fromCur) return { value: amount, ok: true };     // devise inconnue → supposée en devise de réf. (incluse ; marqueur discret sur la ligne)
