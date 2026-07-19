@@ -389,6 +389,9 @@ th.sortable:hover { color: var(--amber); }
 
 /* ============================= POSITIONS ============================= */
 
+.cur-badge { display: inline-block; margin-left: 6px; padding: 1px 5px; font-size: 10px; border-radius: 3px; background: var(--bg-raised); color: var(--text-dim); border: 1px solid #2a3340; }
+.cur-badge.cur-unknown { color: #ff4d4d; border-color: #5a2a2a; }
+
 .base-cur-label { font-size: 12px; color: var(--text-dim); display: inline-flex; align-items: center; gap: 6px; }
 .base-cur-select { font-family: inherit; font-size: 12px; background: var(--bg-raised); color: var(--text); border: 1px solid #2a3340; border-radius: 4px; padding: 4px 6px; }
 
@@ -2698,11 +2701,31 @@ function refPrice(pos) {
   return entry ? entry.ind.price : pos.pru;
 }
 
+const CURRENCY_SYMBOLS = { EUR: "€", USD: "$", GBP: "£", CHF: "CHF", CAD: "C$", JPY: "¥", AUD: "A$" };
+function currencySymbol(code) { return CURRENCY_SYMBOLS[code] || code || ""; }
+
+// Convertit un montant depuis fromCur vers la devise de référence.
+// ok=false si la devise est inconnue ou le taux indisponible → agrégat marqué dégradé.
+function convertToBase(amount, fromCur) {
+  const base = getBaseCurrency();
+  if (!fromCur) return { value: null, ok: false };      // devise inconnue
+  if (fromCur === base) return { value: amount, ok: true };
+  const r = fxRateCached(fromCur, base);
+  if (r === null) return { value: null, ok: false };    // taux pas encore chargé
+  return { value: amount * r, ok: true };
+}
+
+// Valeur d'une position exprimée en devise de référence.
+function positionValueBase(pos) {
+  return convertToBase(pos.qty * refPrice(pos), positionCurrency(pos));
+}
+
 function renderPositions() {
   const tbody = document.getElementById("positions-body");
   tbody.innerHTML = "";
 
-  let totalValue = 0, totalCost = 0;
+  let totalValue = 0, totalCost = 0, degraded = false;
+  const base = getBaseCurrency();
 
   if (positions.length === 0) {
     tbody.innerHTML = `<tr><td colspan="8" class="na">Aucune position — ajoutez-en une ci-dessus.</td></tr>`;
@@ -2710,17 +2733,29 @@ function renderPositions() {
 
   for (const pos of positions) {
     const price = refPrice(pos);
-    const value = pos.qty * price;
-    const cost  = pos.qty * pos.pru;
+    const value = pos.qty * price;          // devise native
+    const cost  = pos.qty * pos.pru;        // devise native
     const pnl   = value - cost;
     const pnlPct = cost > 0 ? (pnl / cost) * 100 : 0;
-    totalValue += value;
-    totalCost  += cost;
+
+    const cur = positionCurrency(pos);
+    const vConv = convertToBase(value, cur);
+    const cConv = convertToBase(cost, cur);
+    if (vConv.ok && cConv.ok) {
+      totalValue += vConv.value;
+      totalCost  += cConv.value;
+    } else {
+      degraded = true;                       // au moins une ligne non convertible
+    }
 
     const noCache = !cache[pos.ticker];
+    const curBadge = cur && cur !== base
+      ? `<span class="cur-badge" title="Cours en ${cur}">${esc(cur)}</span>`
+      : (!cur ? `<span class="cur-badge cur-unknown" title="Devise inconnue (jamais analysé) — supposée exclue du total">?</span>` : "");
+
     const tr = document.createElement("tr");
     tr.innerHTML = `
-      <td class="card-title"><span class="cell-ticker">${esc(pos.ticker)}</span>${noCache ? `<span class="stale-badge" title="Pas de cours en cache : PRU utilisé">PRU</span>` : ""}</td>
+      <td class="card-title"><span class="cell-ticker">${esc(pos.ticker)}</span>${noCache ? `<span class="stale-badge" title="Pas de cours en cache : PRU utilisé">PRU</span>` : ""}${curBadge}</td>
       <td class="num" data-label="Qté">${fmtNum.format(pos.qty)}</td>
       <td class="num" data-label="PRU">${fnum(pos.pru)}</td>
       <td class="num" data-label="Cours">${fnum(price)}</td>
@@ -2754,13 +2789,17 @@ function renderPositions() {
     tbody.appendChild(tr);
   }
 
-  // Ligne de total
+  // Ligne de total — exprimée en devise de référence
   const totalPnl = totalValue - totalCost;
   const totalPnlPct = totalCost > 0 ? (totalPnl / totalCost) * 100 : 0;
-  document.getElementById("total-value").textContent = fnum(totalValue);
+  const sym = currencySymbol(base);
+  const suffix = degraded ? ` ${sym} ⚠` : ` ${sym}`;
+  const elVal = document.getElementById("total-value");
+  elVal.textContent = fnum(totalValue) + suffix;
+  elVal.title = degraded ? "Certaines positions n'ont pas pu être converties (devise inconnue ou taux indisponible) et sont exclues du total." : "";
   const elPnl = document.getElementById("total-pnl");
   const elPct = document.getElementById("total-pnl-pct");
-  elPnl.textContent = fnum(totalPnl);
+  elPnl.textContent = fnum(totalPnl) + " " + sym;
   elPct.textContent = fpct(totalPnlPct);
   elPnl.className = "num " + pctClass(totalPnl);
   elPct.className = "num " + pctClass(totalPnl);
