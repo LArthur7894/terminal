@@ -49,8 +49,12 @@ SCREENER_ALLOWED = {
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
 
 # Endpoint fondamental Yahoo (quoteSummary). Nécessite cookie + crumb (voir _get_yahoo_crumb).
+# incomeStatementHistory sert à juger la régularité du résultat net (BNA). Ajouter un module
+# à cette URL ne coûte pas de requête supplémentaire : c'est le même appel quoteSummary.
+# balanceSheetHistory est volontairement absent : Yahoo n'y renvoie plus que des dates.
 FUND_URL = ("https://query1.finance.yahoo.com/v10/finance/quoteSummary/{sym}"
-            "?modules=summaryDetail,financialData,defaultKeyStatistics,price&crumb={crumb}")
+            "?modules=summaryDetail,financialData,defaultKeyStatistics,price,incomeStatementHistory"
+            "&crumb={crumb}")
 
 # Cookie + crumb Yahoo, partagés entre requêtes (ThreadingHTTPServer → protégés par un verrou).
 # quoteSummary refuse les appels sans ce couple depuis 2023. On les régénère à la demande
@@ -144,8 +148,39 @@ def _normalize_fundamentals(sym, node):
         "payoutRatio": _pick(summary, "payoutRatio"),
         "dividendRate": _pick(summary, "dividendRate") or _pick(summary, "trailingAnnualDividendRate"),
         "recommendationKey": rec if isinstance(rec, str) else None,
+        "recommendationMean": _pick(fin, "recommendationMean"),
+        "numberOfAnalystOpinions": _pick(fin, "numberOfAnalystOpinions"),
         "targetMeanPrice": _pick(fin, "targetMeanPrice"),
+        # Flux de trésorerie et dette : servent au FCF Yield et à la dette nette.
+        "freeCashflow": _pick(fin, "freeCashflow"),
+        "totalDebt": _pick(fin, "totalDebt"),
+        "totalCash": _pick(fin, "totalCash"),
+        "ebitda": _pick(fin, "ebitda"),
+        "sharesOutstanding": _pick(stats, "sharesOutstanding"),
+        # Résultat net par exercice, du plus ancien au plus récent (régularité du BNA).
+        "netIncomeHistory": _net_income_history(node),
     }
+
+
+def _net_income_history(node):
+    """[{year, netIncome}] du plus ancien au plus récent. Liste vide si le module manque."""
+    statements = (node.get("incomeStatementHistory") or {}).get("incomeStatementHistory") or []
+    out = []
+    for st in statements:
+        if not isinstance(st, dict):
+            continue
+        net = _pick(st, "netIncome")
+        end = st.get("endDate")
+        year = None
+        if isinstance(end, dict):
+            fmt = end.get("fmt")
+            if isinstance(fmt, str) and len(fmt) >= 4 and fmt[:4].isdigit():
+                year = int(fmt[:4])
+        if net is None or year is None:
+            continue
+        out.append({"year": year, "netIncome": net})
+    out.sort(key=lambda x: x["year"])
+    return out
 
 
 class Handler(SimpleHTTPRequestHandler):
