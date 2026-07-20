@@ -1699,57 +1699,56 @@ botTest("botProfile: l'apprentissage est appliqué", () => {
   botAssert(learned.rr < neutral.rr, "rrMult devrait réduire le RR");
 });
 
-/* ============================= BOT (PAPER TRADING) ============================= */
-
-const BOT_DEFAULT_CONFIG = {
-  capital: 10000, ticketPct: 0.10, qualityMin: 60, exitScore: 40,
-  stopVolFactor: 0.4, stopMin: 5, stopMax: 20, rrMin: 1.5, rrMax: 3,
-};
-let bot = lsGet(LS.bot, null);
-if (!bot || typeof bot !== "object") {
-  bot = { started: false, startDate: null, cash: BOT_DEFAULT_CONFIG.capital, positions: [], history: [], config: { ...BOT_DEFAULT_CONFIG } };
-}
-bot.config = { ...BOT_DEFAULT_CONFIG, ...(bot.config || {}) };  // migration douce
-if (!Array.isArray(bot.positions)) bot.positions = [];
-if (!Array.isArray(bot.history)) bot.history = [];
-function saveBot() { lsSet(LS.bot, bot); }
+/* ============================= BOT V2 — ÉTAT + MIGRATION =============================
+ * Des bots v1 tournent déjà : la migration doit être sans perte. Les champs absents
+ * sont complétés, `ticketPct` (v1) est abandonné au profit du dimensionnement par le risque.
+ * ==================================================================================== */
 
 function clamp(x, a, b) { return Math.max(a, Math.min(b, x)); }
 
-// Stop-loss (%) adapté à la volatilité annualisée (ind.vol). Défaut 30 % si absente.
-function botStopPct(ind, cfg) {
-  const vol = (ind && ind.vol != null && isFinite(ind.vol)) ? ind.vol : 30;
-  return clamp(cfg.stopVolFactor * vol, cfg.stopMin, cfg.stopMax);
-}
-// Ratio gain/risque croissant avec le score global (qualityMin → rrMin, 100 → rrMax).
-function botRR(score, cfg) {
-  const span = Math.max(1, 100 - cfg.qualityMin);
-  const t = (score - cfg.qualityMin) / span;
-  return clamp(cfg.rrMin + t * (cfg.rrMax - cfg.rrMin), cfg.rrMin, cfg.rrMax);
-}
-function botTargetPct(ind, score, cfg) { return botStopPct(ind, cfg) * botRR(score, cfg); }
-// Montant pondéré par le score, borné, plafonné au cash. Pas de nombre max de positions.
-function botPositionAmount(score, cfg, cash) {
-  const base = cfg.capital * cfg.ticketPct;
-  const weighted = clamp(base * (score / 70), 0.6 * base, 1.6 * base);
-  return Math.min(weighted, cash);
+// Retourne un état v2 valide à partir d'un état brut (v1, v2, null ou corrompu).
+function botMigrateV1(raw) {
+  const cfg = { ...BOT_V2_DEFAULT_CONFIG, ...((raw && raw.config) || {}) };
+  delete cfg.ticketPct;  // v1 : remplacé par riskPerTradePct
+  const b = {
+    started:   !!(raw && raw.started),
+    startDate: (raw && raw.startDate) || null,
+    cash:      (raw && isFinite(raw.cash)) ? raw.cash : cfg.capital,
+    positions: Array.isArray(raw && raw.positions) ? raw.positions : [],
+    history:   Array.isArray(raw && raw.history)   ? raw.history   : [],
+    log:       Array.isArray(raw && raw.log)       ? raw.log       : [],
+    equity:    Array.isArray(raw && raw.equity)    ? raw.equity    : [],
+    learn:     (raw && raw.learn && typeof raw.learn === "object") ? raw.learn : {},
+    config:    cfg,
+  };
+  // Positions v1 → complétées avec les champs v2.
+  b.positions = b.positions.map(p => {
+    const market = p.market || botMarketOf(p.ticker);
+    const volBucket = p.volBucket || (p.family ? String(p.family).split(":")[1] : null) || "moyenne";
+    const family = p.family || `${market}:${volBucket}`;
+    const stopPct = isFinite(p.stopPct) ? p.stopPct : 10;
+    return {
+      ticker: p.ticker, market, family,
+      entryDate: p.entryDate, entryPrice: p.entryPrice, qty: p.qty,
+      stopPct,
+      trailPct:  isFinite(p.trailPct)  ? p.trailPct  : 0.8 * stopPct,
+      targetPct: isFinite(p.targetPct) ? p.targetPct : stopPct * 2,
+      stopLevel: isFinite(p.stopLevel) ? p.stopLevel : p.entryPrice * (1 - stopPct / 100),
+      highest:   isFinite(p.highest)   ? p.highest   : p.entryPrice,
+      horizonDays: isFinite(p.horizonDays) ? p.horizonDays : botHorizonDays(volBucket),
+      scaledOut: !!p.scaledOut,
+      entryScore: isFinite(p.entryScore) ? p.entryScore : null,
+    };
+  });
+  // Historique v1 : famille déduite du ticker (le bucket exact est perdu, « moyenne » par défaut).
+  b.history = b.history.map(h => h.family ? h : { ...h, family: `${botMarketOf(h.ticker)}:moyenne` });
+  return b;
 }
 
-// Cherche le 1er jour (chronologique) après l'achat où le stop ou la cible est franchi (sur clôtures).
-function botFindExit(pos, e) {
-  if (!e || !e.hist || !Array.isArray(e.hist.closes) || !Array.isArray(e.hist.dates)) return null;
-  const stopLevel = pos.entryPrice * (1 - pos.stopPct / 100);
-  const targetLevel = pos.entryPrice * (1 + pos.targetPct / 100);
-  const { dates, closes } = e.hist; // du plus récent au plus ancien → on parcourt à l'envers
-  for (let i = dates.length - 1; i >= 0; i--) {
-    if (dates[i] <= pos.entryDate) continue;
-    const c = closes[i];
-    if (c == null || !isFinite(c)) continue;
-    if (c <= stopLevel) return { price: c, date: dates[i], reason: "stop-loss" };
-    if (c >= targetLevel) return { price: c, date: dates[i], reason: "prise de bénéfice" };
-  }
-  return null;
-}
+let bot = botMigrateV1(lsGet(LS.bot, null));
+function saveBot() { lsSet(LS.bot, bot); }
+
+/* ============================= BOT V2 — MOTEUR ============================= */
 
 // Valeur totale du portefeuille virtuel (cash + positions au cours courant).
 function botPortfolioValue() {
@@ -1770,7 +1769,7 @@ function botSellManual(ticker) {
   const e = cache[ticker] || marketCache[ticker];
   const price = (e && e.ind && e.ind.price > 0) ? e.ind.price : pos.entryPrice;
   bot.cash += pos.qty * price;
-  bot.history.unshift({ ticker, entryDate: pos.entryDate, entryPrice: pos.entryPrice,
+  bot.history.unshift({ ticker, family: pos.family, entryDate: pos.entryDate, entryPrice: pos.entryPrice,
     exitDate: new Date().toISOString().slice(0, 10), exitPrice: price, qty: pos.qty,
     pnl: (price - pos.entryPrice) * pos.qty, pnlPct: (price / pos.entryPrice - 1) * 100, reason: "manuelle" });
   bot.positions.splice(idx, 1);
@@ -1778,80 +1777,170 @@ function botSellManual(ticker) {
   if (typeof renderBot === "function") renderBot();
 }
 
-// Moteur : rafraîchit les positions, applique les sorties (rejeu clôtures + réévaluation), puis achète.
+let botRunning = false;  // garde de réentrance : un seul runBot() à la fois
+
+// Moteur : rafraîchit les positions, applique les sorties, puis achète sur les marchés ouverts.
 async function runBot() {
-  if (!bot.started) return;
-  const cfg = bot.config;
-  const today = new Date().toISOString().slice(0, 10);
+  if (!bot.started || botRunning) return;
+  botRunning = true;
+  try {
+    const cfg = bot.config;
+    const today = new Date().toISOString().slice(0, 10);
+    const openMarkets = botOpenMarkets();
 
-  // a) rafraîchir les positions détenues (best-effort, ≤ N requêtes)
-  for (const pos of bot.positions) {
-    const e = cache[pos.ticker] || marketCache[pos.ticker];
-    if (!e || isStale(e)) {
-      try { await analyzeTicker(pos.ticker, null, { silent: true, skipRender: true, store: cache[pos.ticker] ? cache : marketCache }); }
-      catch (_) { /* on évalue avec ce qu'on a */ }
-    }
-  }
-
-  // b) sorties
-  const stillOpen = [];
-  for (const pos of bot.positions) {
-    const e = cache[pos.ticker] || marketCache[pos.ticker];
-    let exit = e ? botFindExit(pos, e) : null;
-    if (!exit && e && e.ind) {
-      const g = e.score != null ? computeGlobalScore(e) : null;
-      if ((g != null && g <= cfg.exitScore) || e.signal === "Vente") {
-        exit = { price: e.ind.price, date: today, reason: "réévaluation" };
+    // a) rafraîchir les positions détenues (best-effort : une panne n'interrompt pas l'évaluation)
+    for (const pos of bot.positions) {
+      const e = cache[pos.ticker] || marketCache[pos.ticker];
+      if (!e || isStale(e)) {
+        try { await analyzeTicker(pos.ticker, null, { silent: true, skipRender: true, store: cache[pos.ticker] ? cache : marketCache }); }
+        catch (_) { /* on évalue avec ce qu'on a */ }
       }
     }
-    if (exit && isFinite(exit.price) && exit.price > 0) {
-      bot.cash += pos.qty * exit.price;
-      bot.history.unshift({ ticker: pos.ticker, entryDate: pos.entryDate, entryPrice: pos.entryPrice,
-        exitDate: exit.date, exitPrice: exit.price, qty: pos.qty,
-        pnl: (exit.price - pos.entryPrice) * pos.qty, pnlPct: (exit.price / pos.entryPrice - 1) * 100, reason: exit.reason });
-    } else {
-      stillOpen.push(pos);
+
+    // b) sorties
+    const stillOpen = [];
+    for (const pos of bot.positions) {
+      const e = cache[pos.ticker] || marketCache[pos.ticker];
+      let exit = null;
+
+      // Rejeu des clôtures postérieures à l'achat : stop ou cible franchis au jour exact.
+      if (e && e.hist && Array.isArray(e.hist.closes) && Array.isArray(e.hist.dates)) {
+        const { dates, closes } = e.hist;  // du plus récent au plus ancien → parcours à l'envers
+        for (let i = dates.length - 1; i >= 0; i--) {
+          if (dates[i] <= pos.entryDate) continue;
+          const c = closes[i];
+          if (c == null || !isFinite(c)) continue;
+          if (c > pos.highest) pos.highest = c;
+          if (c <= pos.stopLevel) { exit = { price: c, date: dates[i], reason: "stop-loss" }; break; }
+          if (c >= pos.entryPrice * (1 + pos.targetPct / 100)) { exit = { price: c, date: dates[i], reason: "prise de bénéfice" }; break; }
+        }
+      }
+
+      // En direct : seulement si le marché du titre est ouvert (pas de vente sur un prix périmé).
+      if (!exit && e && e.ind && openMarkets.has(pos.market) && isFinite(e.ind.price) && e.ind.price > 0) {
+        const live = e.ind.price;
+        if (live > pos.highest) pos.highest = live;
+        if (live <= pos.stopLevel) exit = { price: live, date: today, reason: "stop-loss" };
+        else if (live >= pos.entryPrice * (1 + pos.targetPct / 100)) exit = { price: live, date: today, reason: "prise de bénéfice" };
+      }
+
+      // Réévaluation par le score : indépendante des sessions (le score ne périme pas comme un cours).
+      if (!exit && e && e.ind) {
+        const g = e.score != null ? computeGlobalScore(e) : null;
+        if ((g != null && g <= cfg.exitScore) || e.signal === "Vente") {
+          exit = { price: e.ind.price, date: today, reason: "réévaluation" };
+        }
+      }
+
+      if (exit && isFinite(exit.price) && exit.price > 0) {
+        bot.cash += pos.qty * exit.price;
+        bot.history.unshift({ ticker: pos.ticker, family: pos.family, entryDate: pos.entryDate, entryPrice: pos.entryPrice,
+          exitDate: exit.date, exitPrice: exit.price, qty: pos.qty,
+          pnl: (exit.price - pos.entryPrice) * pos.qty, pnlPct: (exit.price / pos.entryPrice - 1) * 100, reason: exit.reason });
+      } else {
+        stillOpen.push(pos);
+      }
     }
-  }
-  bot.positions = stillOpen;
+    bot.positions = stillOpen;
 
-  // c) entrées : déployer le capital, sans limite de nombre
-  const held = new Set(bot.positions.map(p => p.ticker));
-  const base = cfg.capital * cfg.ticketPct;
-  const candidates = Object.keys(marketCache)
-    .map(t => ({ t, e: marketCache[t] }))
-    .filter(x => x.e && x.e.ind && x.e.ind.price > 0 && !held.has(x.t) && x.e.score != null && computeGlobalScore(x.e) >= cfg.qualityMin)
-    .sort((a, b) => computeGlobalScore(b.e) - computeGlobalScore(a.e));
-  for (const cand of candidates) {
-    if (bot.cash < 0.2 * base) break;
-    const score = computeGlobalScore(cand.e), ind = cand.e.ind;
-    const amount = botPositionAmount(score, cfg, bot.cash);
-    if (amount < 1) break;
-    bot.cash -= amount;
-    bot.positions.push({ ticker: cand.t, entryDate: today, entryPrice: ind.price, qty: amount / ind.price,
-      stopPct: botStopPct(ind, cfg), targetPct: botTargetPct(ind, score, cfg), entryScore: score });
-    held.add(cand.t);
-  }
+    // c) entrées : uniquement sur les marchés ouverts, dimensionnées par le risque.
+    const held = new Set(bot.positions.map(p => p.ticker));
+    const exposureByMarket = {};
+    for (const pos of bot.positions) {
+      const e = cache[pos.ticker] || marketCache[pos.ticker];
+      const price = (e && e.ind && e.ind.price > 0) ? e.ind.price : pos.entryPrice;
+      exposureByMarket[pos.market] = (exposureByMarket[pos.market] || 0) + pos.qty * price;
+    }
+    const portfolioValue = botPortfolioValue();
 
-  if (bot.history.length > 200) bot.history = bot.history.slice(0, 200);
-  saveBot();
-  if (typeof renderBot === "function") renderBot();
+    const candidates = Object.keys(marketCache)
+      .map(t => ({ t, e: marketCache[t] }))
+      .filter(x => x.e && x.e.ind && x.e.ind.price > 0 && !held.has(x.t) && x.e.score != null
+                   && computeGlobalScore(x.e) >= cfg.qualityMin
+                   && openMarkets.has(botMarketOf(x.t)))
+      .sort((a, b) => computeGlobalScore(b.e) - computeGlobalScore(a.e));
+
+    for (const cand of candidates) {
+      const market = botMarketOf(cand.t);
+      const marketExp = exposureByMarket[market] || 0;
+      const prof = botProfile({ ticker: cand.t, ...cand.e }, cfg, bot.learn, portfolioValue, bot.cash, marketExp);
+      if (prof.amount < 1 || prof.amount > bot.cash) continue;
+      const price = cand.e.ind.price;
+      bot.cash -= prof.amount;
+      bot.positions.push({
+        ticker: cand.t, market: prof.market, family: prof.family,
+        entryDate: today, entryPrice: price, qty: prof.amount / price,
+        stopPct: prof.stopPct, trailPct: prof.trailPct, targetPct: prof.targetPct,
+        stopLevel: price * (1 - prof.stopPct / 100),
+        highest: price,
+        horizonDays: prof.horizonDays,
+        scaledOut: false,
+        entryScore: computeGlobalScore(cand.e),
+      });
+      exposureByMarket[market] = marketExp + prof.amount;
+      held.add(cand.t);
+    }
+
+    if (bot.history.length > 200) bot.history = bot.history.slice(0, 200);
+    saveBot();
+    if (typeof renderBot === "function") renderBot();
+  } finally {
+    botRunning = false;
+  }
 }
 
 function botStart() {
   bot.started = true; bot.startDate = new Date().toISOString();
-  bot.cash = bot.config.capital; bot.positions = []; bot.history = [];
+  bot.cash = bot.config.capital;
+  bot.positions = []; bot.history = []; bot.log = []; bot.equity = []; bot.learn = {};
   saveBot();
   if (typeof renderBot === "function") renderBot();
   runBot();
 }
+
 function botReset() {
-  if (!window.confirm("Réinitialiser le bot ? Positions et historique seront effacés.")) return;
+  if (!window.confirm("Réinitialiser le bot ? Positions, historique, journal et apprentissage seront effacés.")) return;
   bot.started = false; bot.startDate = null;
-  bot.cash = bot.config.capital; bot.positions = []; bot.history = [];
+  bot.cash = bot.config.capital;
+  bot.positions = []; bot.history = []; bot.log = []; bot.equity = []; bot.learn = {};
   saveBot();
   if (typeof renderBot === "function") renderBot();
 }
+
+/* ---------- tests : migration ---------- */
+
+botTest("botMigrateV1: état null → v2 vide valide", () => {
+  const b = botMigrateV1(null);
+  botAssertEq(b.started, false);
+  botAssertEq(b.positions.length, 0);
+  botAssert(Array.isArray(b.log) && Array.isArray(b.equity), "log et equity créés");
+  botAssert(b.learn && typeof b.learn === "object", "learn créé");
+  botAssertEq(b.config.riskPerTradePct, 1);
+});
+
+botTest("botMigrateV1: état v1 → positions complétées, rien de perdu", () => {
+  const v1 = {
+    started: true, startDate: "2026-07-01", cash: 5000,
+    positions: [{ ticker: "ASML.AS", entryDate: "2026-07-02", entryPrice: 800, qty: 5, stopPct: 12, targetPct: 24, entryScore: 78 }],
+    history: [{ ticker: "MC.PA", entryDate: "2026-06-01", exitDate: "2026-06-10", entryPrice: 700, exitPrice: 720, qty: 10, pnl: 200, pnlPct: 2.86, reason: "prise de bénéfice" }],
+    config: { capital: 10000, ticketPct: 0.1, qualityMin: 60 },
+  };
+  const b = botMigrateV1(v1);
+  botAssertEq(b.positions.length, 1);
+  botAssertEq(b.history.length, 1);
+  const p = b.positions[0];
+  botAssertEq(p.market, "EU");
+  botAssertEq(p.family, "EU:moyenne");
+  botAssertEq(p.trailPct, 0.8 * 12);
+  botAssertEq(p.stopLevel, 800 * 0.88);
+  botAssertEq(p.highest, 800);
+  botAssertEq(p.scaledOut, false);
+  botAssertEq(p.horizonDays, 45);
+  botAssertEq(b.history[0].family, "EU:moyenne");
+  botAssert(!("ticketPct" in b.config), "ticketPct doit disparaître");
+  botAssertEq(b.config.riskPerTradePct, 1, "riskPerTradePct rempli par défaut");
+  botAssertEq(b.config.qualityMin, 60, "réglage v1 conservé");
+});
 
 /* ============================= HELPERS localStorage ============================= */
 
@@ -4511,16 +4600,18 @@ renderAlerts();
 
 /* ============================= ONGLET 8 : BOT — UI ============================= */
 
+// Stop, cible et taille ne sont plus réglables : ils sont calculés par titre (botProfile).
+// Seuls restent pilotables le capital, le risque, les plafonds, les frais et la boucle.
 const BOT_CONFIG_FIELDS = [
   ["capital", "Capital (€)", 100],
-  ["ticketPct", "Taille position (part du capital)", 0.01],
+  ["riskPerTradePct", "Risque par trade (%)", 0.1],
+  ["maxPositionPct", "Plafond par position (%)", 1],
+  ["maxMarketPct", "Plafond par marché (%)", 5],
   ["qualityMin", "Score d'achat mini", 1],
   ["exitScore", "Score de sortie", 1],
-  ["stopVolFactor", "Facteur stop (×volatilité)", 0.05],
-  ["stopMin", "Stop min (%)", 1],
-  ["stopMax", "Stop max (%)", 1],
-  ["rrMin", "Ratio gain/risque min", 0.1],
-  ["rrMax", "Ratio gain/risque max", 0.1],
+  ["feePct", "Frais (%)", 0.01],
+  ["slipPct", "Slippage (%)", 0.01],
+  ["loopMinutes", "Boucle auto (minutes)", 1],
 ];
 
 function botCurrentPrice(ticker, fallback) {
