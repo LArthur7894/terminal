@@ -19,6 +19,7 @@
 import json
 import os
 import threading
+import time
 import urllib.request
 import urllib.error
 import urllib.parse
@@ -120,25 +121,32 @@ def _fetch_yahoo_auth():
         raise RuntimeError("cookie refusé par Yahoo (aucune des sources n'a répondu)")
     session = "session" if ("A1=" in cookie_header or "A3=" in cookie_header) else "consentement seul"
 
+    # L'IP partagée de l'hébergeur est régulièrement limitée par Yahoo (HTTP 429). Le crumb
+    # étant ensuite mémorisé pour tout le processus, un seul succès suffit à débloquer
+    # l'ensemble des requêtes : quelques reprises espacées valent mieux qu'un abandon.
     dernier = None
-    for host in _CRUMB_HOSTS:
-        crumb_req = urllib.request.Request(
-            host + "/v1/test/getcrumb",
-            headers={**_BROWSER_HEADERS, "Accept": "*/*", "Cookie": cookie_header})
-        try:
-            with urllib.request.urlopen(crumb_req, timeout=10) as resp:
-                crumb = resp.read().decode("utf-8").strip()
-        except urllib.error.HTTPError as e:
-            dernier = f"HTTP {e.code}"
-            continue
-        except Exception as e:
-            dernier = type(e).__name__
-            continue
-        if crumb and "<" not in crumb and len(crumb) <= 40:
-            return cookie_header, crumb
-        dernier = f"réponse inexploitable ({crumb[:20]!r})"
+    for essai, pause in enumerate((0, 1.5, 4)):
+        if pause:
+            time.sleep(pause)
+        for host in _CRUMB_HOSTS:
+            crumb_req = urllib.request.Request(
+                host + "/v1/test/getcrumb",
+                headers={**_BROWSER_HEADERS, "Accept": "*/*", "Cookie": cookie_header})
+            try:
+                with urllib.request.urlopen(crumb_req, timeout=10) as resp:
+                    crumb = resp.read().decode("utf-8").strip()
+            except urllib.error.HTTPError as e:
+                dernier = f"HTTP {e.code}"
+                continue
+            except Exception as e:
+                dernier = type(e).__name__
+                continue
+            if crumb and "<" not in crumb and len(crumb) <= 40:
+                return cookie_header, crumb
+            dernier = f"réponse inexploitable ({crumb[:20]!r})"
     raise RuntimeError(
-        f"crumb refusé ({dernier}) — cookie {session} obtenu via {source.split('//')[-1].split('/')[0]}")
+        f"crumb refusé ({dernier}, {essai + 1} tentatives) — "
+        f"cookie {session} obtenu via {source.split('//')[-1].split('/')[0]}")
 
 
 def _get_yahoo_crumb(force_refresh=False):
