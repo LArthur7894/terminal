@@ -1777,6 +1777,39 @@ function botSellManual(ticker) {
   if (typeof renderBot === "function") renderBot();
 }
 
+/* Applique un cours à une position et décide d'une éventuelle sortie.
+ * Fonction pure : renvoie une copie mise à jour, ne touche pas à `pos`.
+ *
+ * Le stop suiveur ne s'arme qu'une fois le gain latent supérieur au risque initial
+ * (avant cela, le stop reste fixe à l'entrée). Une fois armé, il ne redescend jamais. */
+function botApplyTick(pos, price, dateStr) {
+  const p = { ...pos };
+  if (!isFinite(price) || price <= 0) return { updated: p, exit: null };
+
+  if (price > p.highest) p.highest = price;
+
+  const initialStop = pos.entryPrice * (1 - pos.stopPct / 100);
+  const gainLatent = (p.highest - pos.entryPrice) / pos.entryPrice;
+  if (gainLatent >= pos.stopPct / 100) {
+    const trail = p.highest * (1 - pos.trailPct / 100);
+    if (trail > p.stopLevel) p.stopLevel = trail;   // monotone croissant
+  }
+
+  if (price <= p.stopLevel) {
+    const reason = p.stopLevel > initialStop + 1e-9 ? "stop suiveur" : "stop-loss";
+    return { updated: p, exit: { price, date: dateStr, reason } };
+  }
+  if (price >= pos.entryPrice * (1 + pos.targetPct / 100)) {
+    return { updated: p, exit: { price, date: dateStr, reason: "prise de bénéfice" } };
+  }
+  return { updated: p, exit: null };
+}
+
+// Âge d'une position en jours calendaires.
+function botAgeDays(entryDate, now = Date.now()) {
+  return (now - new Date(entryDate).getTime()) / 86400000;
+}
+
 let botRunning = false;  // garde de réentrance : un seul runBot() à la fois
 
 // Moteur : rafraîchit les positions, applique les sorties, puis achète sur les marchés ouverts.
@@ -1801,27 +1834,34 @@ async function runBot() {
     const stillOpen = [];
     for (const pos of bot.positions) {
       const e = cache[pos.ticker] || marketCache[pos.ticker];
+      const livePrice = (e && e.ind && isFinite(e.ind.price) && e.ind.price > 0) ? e.ind.price : null;
+      let cur = { ...pos };
       let exit = null;
 
-      // Rejeu des clôtures postérieures à l'achat : stop ou cible franchis au jour exact.
-      if (e && e.hist && Array.isArray(e.hist.closes) && Array.isArray(e.hist.dates)) {
+      // Horizon : une position dormante immobilise du capital, on la libère.
+      if (botAgeDays(pos.entryDate) > pos.horizonDays) {
+        exit = { price: livePrice != null ? livePrice : pos.entryPrice, date: today, reason: "horizon" };
+      }
+
+      // Rejeu des clôtures postérieures à l'achat : le stop suiveur monte jour après jour,
+      // et la sortie est datée du jour exact du franchissement.
+      if (!exit && e && e.hist && Array.isArray(e.hist.closes) && Array.isArray(e.hist.dates)) {
         const { dates, closes } = e.hist;  // du plus récent au plus ancien → parcours à l'envers
         for (let i = dates.length - 1; i >= 0; i--) {
           if (dates[i] <= pos.entryDate) continue;
           const c = closes[i];
           if (c == null || !isFinite(c)) continue;
-          if (c > pos.highest) pos.highest = c;
-          if (c <= pos.stopLevel) { exit = { price: c, date: dates[i], reason: "stop-loss" }; break; }
-          if (c >= pos.entryPrice * (1 + pos.targetPct / 100)) { exit = { price: c, date: dates[i], reason: "prise de bénéfice" }; break; }
+          const r = botApplyTick(cur, c, dates[i]);
+          cur = r.updated;
+          if (r.exit) { exit = r.exit; break; }
         }
       }
 
       // En direct : seulement si le marché du titre est ouvert (pas de vente sur un prix périmé).
-      if (!exit && e && e.ind && openMarkets.has(pos.market) && isFinite(e.ind.price) && e.ind.price > 0) {
-        const live = e.ind.price;
-        if (live > pos.highest) pos.highest = live;
-        if (live <= pos.stopLevel) exit = { price: live, date: today, reason: "stop-loss" };
-        else if (live >= pos.entryPrice * (1 + pos.targetPct / 100)) exit = { price: live, date: today, reason: "prise de bénéfice" };
+      if (!exit && livePrice != null && openMarkets.has(cur.market)) {
+        const r = botApplyTick(cur, livePrice, today);
+        cur = r.updated;
+        if (r.exit) exit = r.exit;
       }
 
       // Réévaluation par le score : indépendante des sessions (le score ne périme pas comme un cours).
@@ -1833,12 +1873,12 @@ async function runBot() {
       }
 
       if (exit && isFinite(exit.price) && exit.price > 0) {
-        bot.cash += pos.qty * exit.price;
-        bot.history.unshift({ ticker: pos.ticker, family: pos.family, entryDate: pos.entryDate, entryPrice: pos.entryPrice,
-          exitDate: exit.date, exitPrice: exit.price, qty: pos.qty,
-          pnl: (exit.price - pos.entryPrice) * pos.qty, pnlPct: (exit.price / pos.entryPrice - 1) * 100, reason: exit.reason });
+        bot.cash += cur.qty * exit.price;
+        bot.history.unshift({ ticker: cur.ticker, family: cur.family, entryDate: cur.entryDate, entryPrice: cur.entryPrice,
+          exitDate: exit.date, exitPrice: exit.price, qty: cur.qty,
+          pnl: (exit.price - cur.entryPrice) * cur.qty, pnlPct: (exit.price / cur.entryPrice - 1) * 100, reason: exit.reason });
       } else {
-        stillOpen.push(pos);
+        stillOpen.push(cur);
       }
     }
     bot.positions = stillOpen;
@@ -1941,6 +1981,60 @@ botTest("botMigrateV1: état v1 → positions complétées, rien de perdu", () =
   botAssert(!("ticketPct" in b.config), "ticketPct doit disparaître");
   botAssertEq(b.config.riskPerTradePct, 1, "riskPerTradePct rempli par défaut");
   botAssertEq(b.config.qualityMin, 60, "réglage v1 conservé");
+});
+
+/* ---------- tests : stop suiveur et horizon ---------- */
+
+// Position type : entrée 100, stop 10 %, suiveur 8 %, cible lointaine (on isole le suiveur).
+function botMkPos(over = {}) {
+  return { ticker: "X", market: "US", family: "US:moyenne", entryDate: "2026-01-01",
+    entryPrice: 100, qty: 10, stopPct: 10, trailPct: 8, targetPct: 100,
+    stopLevel: 90, highest: 100, horizonDays: 45, scaledOut: false, ...over };
+}
+
+botTest("botApplyTick: le stop suiveur ne redescend jamais", () => {
+  let s = botApplyTick(botMkPos(), 120, "d1");
+  botAssertEq(s.exit, null, "pas de sortie à 120");
+  s = botApplyTick(s.updated, 130, "d2");
+  botAssert(s.updated.stopLevel > 90, "le stop doit avoir monté");
+  const atteint = s.updated.stopLevel;
+  s = botApplyTick(s.updated, 125, "d3"); botAssertEq(s.updated.stopLevel, atteint, "stable en repli");
+  s = botApplyTick(s.updated, 120, "d4"); botAssertEq(s.updated.stopLevel, atteint, "toujours stable");
+});
+
+botTest("botApplyTick: le suiveur ne s'arme qu'une fois le risque couvert", () => {
+  // +5 % de gain latent < 10 % de risque → stop encore fixe à l'entrée
+  const s = botApplyTick(botMkPos(), 105, "d1");
+  botAssertEq(s.updated.stopLevel, 90, "le stop doit rester à son niveau initial");
+});
+
+botTest("botApplyTick: déclenchement au bon prix, raison « stop suiveur »", () => {
+  let s = botApplyTick(botMkPos(), 130, "d1");
+  botAssertClose(s.updated.stopLevel, 130 * 0.92, 1e-9, "suiveur à 8 % sous le plus haut");
+  s = botApplyTick(s.updated, 118, "d2");
+  botAssert(s.exit && s.exit.reason === "stop suiveur", "sortie « stop suiveur » attendue");
+});
+
+botTest("botApplyTick: chute directe → « stop-loss », pas « stop suiveur »", () => {
+  const s = botApplyTick(botMkPos(), 85, "d1");
+  botAssert(s.exit && s.exit.reason === "stop-loss", "le suiveur n'a jamais été armé");
+});
+
+botTest("botApplyTick: cible atteinte", () => {
+  const s = botApplyTick(botMkPos({ targetPct: 20 }), 125, "d1");
+  botAssert(s.exit && s.exit.reason === "prise de bénéfice");
+});
+
+botTest("botApplyTick: prix invalide ignoré", () => {
+  botAssertEq(botApplyTick(botMkPos(), 0, "d1").exit, null);
+  botAssertEq(botApplyTick(botMkPos(), NaN, "d1").exit, null);
+});
+
+botTest("botAgeDays: dépassement d'horizon détecté", () => {
+  const vieux = new Date(Date.now() - 100 * 86400000).toISOString().slice(0, 10);
+  botAssert(botAgeDays(vieux) > 60, "100 jours doivent dépasser tous les horizons");
+  const recent = new Date(Date.now() - 5 * 86400000).toISOString().slice(0, 10);
+  botAssert(botAgeDays(recent) < 30, "5 jours ne dépassent aucun horizon");
 });
 
 /* ============================= HELPERS localStorage ============================= */
