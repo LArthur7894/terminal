@@ -1768,10 +1768,11 @@ function botSellManual(ticker) {
   const pos = bot.positions[idx];
   const e = cache[ticker] || marketCache[ticker];
   const price = (e && e.ind && e.ind.price > 0) ? e.ind.price : pos.entryPrice;
-  bot.cash += pos.qty * price;
+  const { cashIn, net } = botApplyExitProceeds(price, pos.qty, bot.config);
+  bot.cash += cashIn;
   bot.history.unshift({ ticker, family: pos.family, entryDate: pos.entryDate, entryPrice: pos.entryPrice,
     exitDate: new Date().toISOString().slice(0, 10), exitPrice: price, qty: pos.qty,
-    pnl: (price - pos.entryPrice) * pos.qty, pnlPct: (price / pos.entryPrice - 1) * 100, reason: "manuelle" });
+    pnl: cashIn - pos.entryPrice * pos.qty, pnlPct: (net / pos.entryPrice - 1) * 100, reason: "manuelle" });
   bot.positions.splice(idx, 1);
   saveBot();
   if (typeof renderBot === "function") renderBot();
@@ -1813,6 +1814,24 @@ function botApplyTick(pos, price, dateStr) {
 // Âge d'une position en jours calendaires.
 function botAgeDays(entryDate, now = Date.now()) {
   return (now - new Date(entryDate).getTime()) / 86400000;
+}
+
+/* Frais et slippage — appliqués à l'entrée ET à la sortie.
+ * Les trades déjà présents dans bot.history ne sont pas réécrits : leurs
+ * chiffres restent ceux du moment où ils ont été enregistrés. */
+
+// Achat : on paie un peu plus cher que l'affiché (slippage) et on règle la commission.
+function botApplyEntryCost(price, amount, cfg) {
+  const filled = price * (1 + cfg.slipPct / 100);
+  const cashOut = amount * (1 + cfg.feePct / 100);
+  return { filled, cashOut, qty: amount / filled };
+}
+
+// Vente : on reçoit un peu moins que l'affiché, commission déduite du produit.
+function botApplyExitProceeds(price, qty, cfg) {
+  const filled = price * (1 - cfg.slipPct / 100);
+  const cashIn = filled * qty * (1 - cfg.feePct / 100);
+  return { filled, cashIn, net: qty > 0 ? cashIn / qty : 0 };
 }
 
 let botRunning = false;  // garde de réentrance : un seul runBot() à la fois
@@ -1880,10 +1899,12 @@ async function runBot() {
       if (exit && isFinite(exit.price) && exit.price > 0) {
         // Prise partielle : on vend la moitié, le reliquat reste ouvert sous stop suiveur.
         const soldQty = exit.partial ? cur.qty / 2 : cur.qty;
-        bot.cash += soldQty * exit.price;
+        const { cashIn, net } = botApplyExitProceeds(exit.price, soldQty, cfg);
+        bot.cash += cashIn;
         bot.history.unshift({ ticker: cur.ticker, family: cur.family, entryDate: cur.entryDate, entryPrice: cur.entryPrice,
           exitDate: exit.date, exitPrice: exit.price, qty: soldQty,
-          pnl: (exit.price - cur.entryPrice) * soldQty, pnlPct: (exit.price / cur.entryPrice - 1) * 100, reason: exit.reason });
+          pnl: cashIn - cur.entryPrice * soldQty,            // net de frais et de slippage
+          pnlPct: (net / cur.entryPrice - 1) * 100, reason: exit.reason });
         if (exit.partial) {
           cur.qty -= soldQty;
           cur.scaledOut = true;
@@ -1916,15 +1937,16 @@ async function runBot() {
       const market = botMarketOf(cand.t);
       const marketExp = exposureByMarket[market] || 0;
       const prof = botProfile({ ticker: cand.t, ...cand.e }, cfg, bot.learn, portfolioValue, bot.cash, marketExp);
-      if (prof.amount < 1 || prof.amount > bot.cash) continue;
-      const price = cand.e.ind.price;
-      bot.cash -= prof.amount;
+      if (prof.amount < 1) continue;
+      const { filled, cashOut, qty } = botApplyEntryCost(cand.e.ind.price, prof.amount, cfg);
+      if (cashOut > bot.cash) continue;
+      bot.cash -= cashOut;
       bot.positions.push({
         ticker: cand.t, market: prof.market, family: prof.family,
-        entryDate: today, entryPrice: price, qty: prof.amount / price,
+        entryDate: today, entryPrice: filled, qty,
         stopPct: prof.stopPct, trailPct: prof.trailPct, targetPct: prof.targetPct,
-        stopLevel: price * (1 - prof.stopPct / 100),
-        highest: price,
+        stopLevel: filled * (1 - prof.stopPct / 100),
+        highest: filled,
         horizonDays: prof.horizonDays,
         scaledOut: false,
         entryScore: computeGlobalScore(cand.e),
@@ -2054,6 +2076,36 @@ botTest("botApplyTick: après le partiel, le suiveur reste actif", () => {
 botTest("botApplyTick: prix invalide ignoré", () => {
   botAssertEq(botApplyTick(botMkPos(), 0, "d1").exit, null);
   botAssertEq(botApplyTick(botMkPos(), NaN, "d1").exit, null);
+});
+
+/* ---------- tests : frais et slippage ---------- */
+
+botTest("frais/slippage: un aller-retour à prix constant est perdant", () => {
+  const cfg = { ...BOT_V2_DEFAULT_CONFIG, feePct: 0.10, slipPct: 0.05 };
+  const prix = 100, mise = 1000;
+  const entree = botApplyEntryCost(prix, mise, cfg);
+  const sortie = botApplyExitProceeds(prix, entree.qty, cfg);
+
+  // Coût réel = ce qui sort de la poche moins ce qui y revient.
+  // 2× slippage (0,05 %) + 2× frais (0,10 %) ≈ 0,30 % de 1000 € ≈ 3 €.
+  const coutReel = entree.cashOut - sortie.cashIn;
+  botAssert(coutReel > 0, "un aller-retour à prix inchangé doit coûter de l'argent");
+  botAssertClose(coutReel, 3, 0.1, "coût total attendu ≈ 3 € sur 1000 €");
+
+  // Le P&L historisé se mesure sur le prix d'entrée (slippage inclus, commission
+  // d'entrée exclue — conformément au spec) : il montre donc ≈ 2 € de perte.
+  const pnlHistorise = sortie.cashIn - entree.filled * entree.qty;
+  botAssertClose(-pnlHistorise, 2, 0.1, "P&L historisé ≈ -2 € (hors commission d'entrée)");
+});
+
+botTest("frais/slippage: appliqués des deux côtés", () => {
+  const cfg = { ...BOT_V2_DEFAULT_CONFIG, feePct: 0.10, slipPct: 0.05 };
+  const e = botApplyEntryCost(100, 1000, cfg);
+  botAssert(e.filled > 100, "on achète au-dessus du cours affiché (slippage)");
+  botAssert(e.cashOut > 1000, "la commission s'ajoute à la mise");
+  const s = botApplyExitProceeds(100, 10, cfg);
+  botAssert(s.filled < 100, "on vend sous le cours affiché (slippage)");
+  botAssert(s.cashIn < 1000, "la commission se déduit du produit");
 });
 
 botTest("botAgeDays: dépassement d'horizon détecté", () => {
