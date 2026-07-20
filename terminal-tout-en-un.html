@@ -1756,6 +1756,81 @@ function botLog(kind, ticker, msg) {
   if (bot.log.length > 150) bot.log = bot.log.slice(0, 150);
 }
 
+/* ============================= BOT V2 — APPRENTISSAGE =============================
+ * Le bot corrige ses réglages famille par famille (`marché:volatilité`, 9 au plus)
+ * à partir de ses propres trades. Les statistiques sont TOUJOURS recalculées depuis
+ * bot.history, jamais accumulées : pas de dérive silencieuse, et vider l'historique
+ * remet l'apprentissage à neutre tout seul.
+ * ============================================================================== */
+
+function botClampMult(x) { return clamp(x, 0.70, 1.30); }
+function botClampQAdj(x) { return clamp(x, 0, 15); }
+// Déplace `from` d'au plus 10 % de l'écart vers `target` : impossible de partir
+// en vrille sur une série chanceuse.
+function botSmooth(from, target) { return from + (target - from) * 0.10; }
+
+function botComputeLearning(history, cfg, previous = {}) {
+  // Apprentissage désactivé : tout est neutre, mais les statistiques restent affichées.
+  if (!cfg.learnEnabled) {
+    const neutre = {};
+    for (const k of Object.keys(previous)) neutre[k] = { ...previous[k], stopMult: 1, rrMult: 1, qualityAdj: 0 };
+    return neutre;
+  }
+
+  const parFamille = {};
+  for (const h of history) {
+    if (!h.family) continue;
+    (parFamille[h.family] = parFamille[h.family] || []).push(h);
+  }
+
+  const out = { ...previous };
+  for (const [family, trades] of Object.entries(parFamille)) {
+    const n = trades.length;
+    const gagnants = trades.filter(t => t.pnl > 0);
+    const perdants = trades.filter(t => t.pnl <= 0);
+    const stops    = trades.filter(t => t.reason === "stop-loss");
+    const winRate  = gagnants.length / n;
+    const stopRate = stops.length / n;
+    const avgWin   = gagnants.length ? gagnants.reduce((s, t) => s + t.pnl, 0) / gagnants.length : 0;
+    const avgLoss  = perdants.length ? Math.abs(perdants.reduce((s, t) => s + t.pnl, 0) / perdants.length) : 0;
+    const avgPnl   = trades.reduce((s, t) => s + t.pnl, 0) / n;
+
+    const prec = previous[family] || { stopMult: 1, rrMult: 1, qualityAdj: 0 };
+    let { stopMult, rrMult, qualityAdj } = prec;
+
+    // Sous le seuil de trades, la famille reste neutre : on n'apprend pas du bruit.
+    if (n >= cfg.learnMinTrades) {
+      // Trop de stops touchés → on sort sur du bruit, il faut élargir. Trop peu → stop inutilement large.
+      if      (stopRate > 0.45) stopMult = botSmooth(stopMult, 1.30);
+      else if (stopRate < 0.15) stopMult = botSmooth(stopMult, 0.70);
+      else                      stopMult = botSmooth(stopMult, 1.00);
+
+      // Souvent gagnant mais petits gains → on coupe trop tôt. Rarement gagnant mais gros gains → cible inatteignable.
+      if      (winRate > 0.60 && avgWin < avgLoss)     rrMult = botSmooth(rrMult, 1.30);
+      else if (winRate < 0.40 && avgWin > 2 * avgLoss) rrMult = botSmooth(rrMult, 0.70);
+      else                                             rrMult = botSmooth(rrMult, 1.00);
+
+      // Famille qui perd de l'argent → on y devient plus exigeant à l'achat.
+      if      (n >= 15 && avgPnl < 0) qualityAdj = botClampQAdj(qualityAdj + 5);
+      else if (n >= 15 && avgPnl > 0) qualityAdj = botClampQAdj(qualityAdj - 5);
+    }
+
+    out[family] = {
+      stopMult: botClampMult(stopMult), rrMult: botClampMult(rrMult), qualityAdj,
+      n, winRate, stopRate, avgWin, avgLoss, avgPnl,
+      updatedAt: new Date().toISOString(),
+    };
+  }
+  return out;
+}
+
+// Correctif de seuil de qualité appliqué à un candidat (familles perdantes = plus exigeantes).
+function botQualityAdjFor(ticker, ind, learn) {
+  const vol = (ind && ind.vol != null && isFinite(ind.vol)) ? ind.vol : 30;
+  const fam = learn[`${botMarketOf(ticker)}:${botVolBucket(vol)}`];
+  return (fam && fam.qualityAdj) || 0;
+}
+
 /* ============================= BOT V2 — MOTEUR ============================= */
 
 // Valeur totale du portefeuille virtuel (cash + positions au cours courant).
@@ -1853,6 +1928,9 @@ async function runBot() {
     const cfg = bot.config;
     const today = new Date().toISOString().slice(0, 10);
     const openMarkets = botOpenMarkets();
+
+    // Recalcul complet de l'apprentissage depuis l'historique, avant toute décision.
+    bot.learn = botComputeLearning(bot.history, cfg, bot.learn);
 
     // Les refus ne sont journalisés qu'une fois par cause et par évaluation :
     // sinon la boucle de 15 min noierait le journal.
@@ -1962,6 +2040,13 @@ async function runBot() {
     for (const cand of candidates) {
       const market = botMarketOf(cand.t);
       if (!openMarkets.has(market)) { refuser(`Marché ${market} fermé — achats suspendus.`); continue; }
+
+      // Seuil de qualité relevé sur les familles qui perdent de l'argent.
+      const qAdj = botQualityAdjFor(cand.t, cand.e.ind, bot.learn);
+      if (qAdj > 0 && computeGlobalScore(cand.e) < cfg.qualityMin + qAdj) {
+        refuser(`Famille ${market} en perte — seuil de qualité relevé de ${qAdj} points.`);
+        continue;
+      }
 
       const marketExp = exposureByMarket[market] || 0;
       const prof = botProfile({ ticker: cand.t, ...cand.e }, cfg, bot.learn, portfolioValue, bot.cash, marketExp);
@@ -2110,6 +2195,88 @@ botTest("botApplyTick: après le partiel, le suiveur reste actif", () => {
 botTest("botApplyTick: prix invalide ignoré", () => {
   botAssertEq(botApplyTick(botMkPos(), 0, "d1").exit, null);
   botAssertEq(botApplyTick(botMkPos(), NaN, "d1").exit, null);
+});
+
+/* ---------- tests : apprentissage ---------- */
+
+function botMkTrade(family, pnl, reason) {
+  return { ticker: "X", family, entryDate: "2026-01-01", exitDate: "2026-01-10",
+    entryPrice: 100, exitPrice: 100 + pnl / 10, qty: 10, pnl, pnlPct: pnl / 10, reason };
+}
+
+botTest("botComputeLearning: neutre sous le seuil de trades", () => {
+  const h = Array.from({ length: 9 }, () => botMkTrade("US:moyenne", -10, "stop-loss"));
+  const l = botComputeLearning(h, BOT_V2_DEFAULT_CONFIG, {});
+  botAssertEq(l["US:moyenne"].stopMult, 1);
+  botAssertEq(l["US:moyenne"].rrMult, 1);
+  botAssertEq(l["US:moyenne"].qualityAdj, 0);
+  botAssertEq(l["US:moyenne"].n, 9, "les stats restent calculées");
+});
+
+botTest("botComputeLearning: > 45 % de stops élargit le stop", () => {
+  const h = [];
+  for (let i = 0; i < 6; i++) h.push(botMkTrade("US:forte", -5, "stop-loss"));
+  for (let i = 0; i < 4; i++) h.push(botMkTrade("US:forte",  8, "prise partielle"));
+  const l = botComputeLearning(h, BOT_V2_DEFAULT_CONFIG, {});
+  botAssert(l["US:forte"].stopMult > 1, "le stop doit s'élargir (on sort sur du bruit)");
+});
+
+botTest("botComputeLearning: < 15 % de stops resserre le stop", () => {
+  const h = [];
+  h.push(botMkTrade("EU:faible", -5, "stop-loss"));
+  for (let i = 0; i < 19; i++) h.push(botMkTrade("EU:faible", 6, "prise partielle"));
+  const l = botComputeLearning(h, BOT_V2_DEFAULT_CONFIG, {});
+  botAssert(l["EU:faible"].stopMult < 1, "un stop jamais touché est inutilement large");
+});
+
+botTest("botComputeLearning: multiplicateurs bornés [0,70 ; 1,30]", () => {
+  const h = Array.from({ length: 20 }, () => botMkTrade("US:forte", -5, "stop-loss"));
+  let l = { "US:forte": { stopMult: 1, rrMult: 1, qualityAdj: 0 } };
+  for (let i = 0; i < 200; i++) l = botComputeLearning(h, BOT_V2_DEFAULT_CONFIG, l);
+  botAssert(l["US:forte"].stopMult <= 1.30 + 1e-9, "stopMult borné en haut");
+  botAssert(l["US:forte"].stopMult >= 0.70 - 1e-9, "stopMult borné en bas");
+  botAssert(l["US:forte"].rrMult   <= 1.30 + 1e-9 && l["US:forte"].rrMult >= 0.70 - 1e-9, "rrMult borné");
+});
+
+botTest("botComputeLearning: lissage de 10 % par passe au plus", () => {
+  const h = Array.from({ length: 20 }, () => botMkTrade("US:forte", -5, "stop-loss"));
+  const prec = { "US:forte": { stopMult: 1.0, rrMult: 1.0, qualityAdj: 0 } };
+  const l = botComputeLearning(h, BOT_V2_DEFAULT_CONFIG, prec);
+  // cible 1,30 depuis 1,00 → au plus 1,00 + 0,10 × 0,30 = 1,03
+  botAssertClose(l["US:forte"].stopMult, 1.03, 1e-9, "un seul pas de lissage");
+});
+
+botTest("botComputeLearning: qualityAdj borné [0 ; 15]", () => {
+  const perdante = Array.from({ length: 20 }, () => botMkTrade("EU:moyenne", -10, "réévaluation"));
+  let l = {};
+  for (let i = 0; i < 10; i++) l = botComputeLearning(perdante, BOT_V2_DEFAULT_CONFIG, l);
+  botAssertEq(l["EU:moyenne"].qualityAdj, 15, "plafonné à +15");
+
+  const gagnante = Array.from({ length: 20 }, () => botMkTrade("EU:moyenne", 10, "prise partielle"));
+  for (let i = 0; i < 10; i++) l = botComputeLearning(gagnante, BOT_V2_DEFAULT_CONFIG, l);
+  botAssertEq(l["EU:moyenne"].qualityAdj, 0, "revient à 0, jamais négatif");
+});
+
+botTest("botComputeLearning: learnEnabled=false neutralise tout", () => {
+  const h = Array.from({ length: 20 }, () => botMkTrade("US:forte", -5, "stop-loss"));
+  const cfg = { ...BOT_V2_DEFAULT_CONFIG, learnEnabled: false };
+  const l = botComputeLearning(h, cfg, { "US:forte": { stopMult: 1.2, rrMult: 0.8, qualityAdj: 5, n: 20 } });
+  botAssertEq(l["US:forte"].stopMult, 1);
+  botAssertEq(l["US:forte"].rrMult, 1);
+  botAssertEq(l["US:forte"].qualityAdj, 0);
+  botAssertEq(l["US:forte"].n, 20, "les stats restent affichées");
+});
+
+botTest("botComputeLearning: historique vidé → apprentissage neutre", () => {
+  const l = botComputeLearning([], BOT_V2_DEFAULT_CONFIG, {});
+  botAssertEq(Object.keys(l).length, 0, "aucune famille sans trade");
+});
+
+botTest("botQualityAdjFor: correctif retrouvé par famille", () => {
+  const learn = { "US:forte": { stopMult: 1, rrMult: 1, qualityAdj: 10 } };
+  botAssertEq(botQualityAdjFor("AAPL", { vol: 55 }, learn), 10);
+  botAssertEq(botQualityAdjFor("AAPL", { vol: 25 }, learn), 0, "autre bucket, pas de correctif");
+  botAssertEq(botQualityAdjFor("MC.PA", { vol: 55 }, learn), 0, "autre marché, pas de correctif");
 });
 
 /* ---------- tests : journal ---------- */
