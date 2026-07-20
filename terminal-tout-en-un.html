@@ -351,6 +351,36 @@ th.sortable:hover { color: var(--amber); }
 .bot-settings summary { cursor: pointer; color: var(--text-dim); font-size: 12px; text-transform: uppercase; letter-spacing: 1px; }
 .bot-settings .filter-panel { margin-top: 10px; }
 #bot-positions, #bot-history { margin-bottom: 8px; }
+.bot-session { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; margin-bottom: 12px;
+  padding: 8px 10px; border: 1px solid var(--border); border-radius: 4px; font-size: 12px; }
+.bot-session .sess { font-family: var(--mono); }
+.bot-session .sess.open { color: var(--green); }
+.bot-session .sess.closed { color: var(--text-dim); }
+.bot-session .loop-toggle { display: inline-flex; align-items: center; gap: 6px; margin-left: auto; color: var(--text-dim); }
+.bot-expo { margin: 10px 0 4px; display: grid; gap: 5px; }
+.bot-expo-row { display: grid; grid-template-columns: 44px 1fr 62px; align-items: center; gap: 8px; font-size: 12px; font-family: var(--mono); }
+.bot-expo-bar { height: 8px; background: var(--border); border-radius: 4px; overflow: hidden; }
+.bot-expo-bar > i { display: block; height: 100%; background: var(--amber); }
+.bot-expo-bar > i.over { background: var(--red); }
+/* overflow caché : un canvas Chart.js dimensionné avant un redimensionnement de
+   fenêtre ne doit jamais pouvoir élargir la page. */
+/* Autonome (pas de .chart-holder) : cette règle précède .chart-holder dans la
+   feuille, qui écraserait sa hauteur. overflow caché pour qu'un canvas Chart.js
+   dimensionné avant un redimensionnement ne puisse jamais élargir la page. */
+.bot-equity-holder { position: relative; height: 200px; margin-top: 10px; overflow: hidden; }
+.bot-log-row { font-size: 12px; padding: 4px 0; border-bottom: 1px solid var(--border); display: flex; gap: 8px; }
+.bot-log-row:last-child { border-bottom: 0; }
+.bot-log-kind { flex: 0 0 62px; text-transform: uppercase; font-size: 10px; letter-spacing: 1px; padding-top: 2px; }
+.bot-log-kind.achat { color: var(--green); }
+.bot-log-kind.vente { color: var(--red); }
+.bot-log-kind.partiel { color: var(--amber); }
+.bot-log-kind.ignoré, .bot-log-kind.info { color: var(--text-dim); }
+.bot-log-time { flex: 0 0 42px; color: var(--text-dim); font-family: var(--mono); font-size: 11px; padding-top: 2px; }
+.bot-trail { color: var(--amber); }
+@media (max-width: 620px) {
+  .bot-session .loop-toggle { margin-left: 0; }
+  .bot-log-row { flex-wrap: wrap; gap: 4px 8px; }
+}
 .compare-select { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 10px; }
 .compare-chk { display: inline-flex; align-items: center; gap: 5px; font-family: var(--mono); font-size: 13px; }
 .compare-data td.best { color: var(--green); font-weight: 700; }
@@ -1056,10 +1086,27 @@ th.sortable:hover { color: var(--amber); }
         <h1>Bot <span class="muted">/ simulateur (paper trading) — argent 100 % virtuel, pas un conseil</span></h1>
         <span class="market-actions" id="bot-actions"></span>
       </div>
+      <div id="bot-session" class="bot-session"></div>
       <div id="bot-summary" class="bot-summary"></div>
       <div id="bot-positions"></div>
-      <h2 class="alerts-log-title">Historique des trades</h2>
-      <div id="bot-history"></div>
+
+      <details class="bot-settings" open>
+        <summary>Statistiques</summary>
+        <div id="bot-stats"></div>
+        <div class="bot-equity-holder"><canvas id="bot-equity-canvas"></canvas></div>
+      </details>
+      <details class="bot-settings">
+        <summary>Familles apprises</summary>
+        <div id="bot-learn"></div>
+      </details>
+      <details class="bot-settings">
+        <summary>Journal des décisions</summary>
+        <div id="bot-log"></div>
+      </details>
+      <details class="bot-settings">
+        <summary>Historique des trades</summary>
+        <div id="bot-history"></div>
+      </details>
       <details class="bot-settings">
         <summary>Réglages du bot</summary>
         <div id="bot-config" class="filter-panel"></div>
@@ -5151,6 +5198,185 @@ function botCurrentPrice(ticker, fallback) {
   return (e && e.ind && e.ind.price > 0) ? e.ind.price : fallback;
 }
 
+let botEquityChart = null;
+
+const BOT_MARKET_LABEL = { EU: "🇪🇺 Europe", US: "🇺🇸 US", ASIA: "🇯🇵 Asie" };
+
+// « 1 h 12 » / « 43 min » — délai lisible avant la prochaine ouverture.
+function botFmtDelay(ms) {
+  const min = Math.max(0, Math.round(ms / 60000));
+  if (min < 60) return `${min} min`;
+  const h = Math.floor(min / 60), m = min % 60;
+  return m ? `${h} h ${String(m).padStart(2, "0")}` : `${h} h`;
+}
+
+function renderBotSession() {
+  const el = document.getElementById("bot-session");
+  if (!el) return;
+  const open = botOpenMarkets();
+  const sessions = ["EU", "US", "ASIA"].map(m => {
+    if (open.has(m)) return `<span class="sess open">${BOT_MARKET_LABEL[m]} ouverte</span>`;
+    return `<span class="sess closed">${BOT_MARKET_LABEL[m]} ouvre dans ${botFmtDelay(botNextOpen(m))}</span>`;
+  }).join("");
+
+  const prochaine = (bot.started && botNextRunAt)
+    ? `prochaine évaluation à ${botNextRunAt.toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" })}`
+    : (bot.started ? "boucle en pause (onglet en arrière-plan)" : "bot à l'arrêt");
+
+  el.innerHTML = `${sessions}
+    <label class="loop-toggle">
+      <input type="checkbox" class="js-bot-cfg" data-key="autoLoop" ${bot.config.autoLoop ? "checked" : ""}>
+      Boucle auto (${bot.config.loopMinutes} min) — ${esc(prochaine)}
+    </label>`;
+}
+
+// Barres d'exposition par marché, avec le plafond en repère.
+function renderBotExposure(total) {
+  const expo = {};
+  for (const p of bot.positions) {
+    expo[p.market] = (expo[p.market] || 0) + p.qty * botCurrentPrice(p.ticker, p.entryPrice);
+  }
+  const marches = Object.keys(expo);
+  if (!marches.length || total <= 0) return "";
+  const rows = marches.sort().map(m => {
+    const pct = (expo[m] / total) * 100;
+    const depasse = pct > bot.config.maxMarketPct;
+    return `<div class="bot-expo-row">
+      <span>${esc(m)}</span>
+      <span class="bot-expo-bar"><i class="${depasse ? "over" : ""}" style="width:${Math.min(100, pct).toFixed(1)}%"></i></span>
+      <span class="num">${fpct(pct).replace("+", "")}</span>
+    </div>`;
+  }).join("");
+  return `<div class="bot-expo">${rows}
+    <p class="hint">Plafond ${bot.config.maxMarketPct} % par marché, ${bot.config.maxPositionPct} % par position.</p></div>`;
+}
+
+function renderBotStats() {
+  const el = document.getElementById("bot-stats");
+  if (!el) return;
+  const s = botStats(bot.history, bot.equity);
+
+  if (!s.n && bot.equity.length < 2) {
+    el.innerHTML = `<p class="analysis-empty">Pas encore assez d'historique. Les statistiques apparaîtront après les premiers trades clôturés.</p>`;
+    if (botEquityChart) { botEquityChart.destroy(); botEquityChart = null; }
+    return;
+  }
+
+  const pf = s.profitFactor === Infinity ? "∞" : fnum(s.profitFactor);
+  el.innerHTML = `<dl class="impact-grid">
+    <div><dt>Performance totale</dt><dd class="${pctClass(s.totalPct)}">${fpct(s.totalPct)}</dd></div>
+    <div><dt>Drawdown maximum</dt><dd class="neg">−${fnum(s.drawdownPct)} %</dd></div>
+    <div><dt>Taux de réussite</dt><dd>${Math.round(s.winRate * 100)} %</dd></div>
+    <div><dt>Profit factor</dt><dd>${pf}</dd></div>
+    <div><dt>Gain moyen</dt><dd class="pos">${fnum(s.avgWin)} €</dd></div>
+    <div><dt>Perte moyenne</dt><dd class="neg">${fnum(s.avgLoss)} €</dd></div>
+    <div><dt>Espérance / trade</dt><dd class="${pctClass(s.expectancy)}">${fnum(s.expectancy)} €</dd></div>
+    <div><dt>Trades clôturés</dt><dd>${s.n}</dd></div>
+  </dl>
+  ${botGroupTable("Par marché", s.byMarket)}
+  ${botGroupTable("Par famille", s.byFamily)}
+  ${botGroupTable("Par raison de sortie", s.byReason)}`;
+
+  renderBotEquityChart();
+}
+
+function botGroupTable(titre, groupe) {
+  const cles = Object.keys(groupe);
+  if (!cles.length) return "";
+  const rows = cles.sort((a, b) => groupe[b].n - groupe[a].n).map(k => {
+    const g = groupe[k];
+    return `<tr>
+      <td class="card-title">${esc(k)}</td>
+      <td class="num" data-label="Trades">${g.n}</td>
+      <td class="num" data-label="Réussite">${Math.round((g.gagnants / g.n) * 100)} %</td>
+      <td class="num ${pctClass(g.pnl)}" data-label="P&L">${fnum(g.pnl)} €</td>
+    </tr>`;
+  }).join("");
+  return `<h2 class="alerts-log-title">${esc(titre)}</h2>
+    <div class="table-wrap"><table class="data-table"><thead><tr>
+      <th>${esc(titre.replace("Par ", ""))}</th><th class="num">Trades</th><th class="num">Réussite</th><th class="num">P&L</th>
+    </tr></thead><tbody>${rows}</tbody></table></div>`;
+}
+
+function renderBotEquityChart() {
+  const canvas = document.getElementById("bot-equity-canvas");
+  if (!canvas) return;
+  if (botEquityChart) { botEquityChart.destroy(); botEquityChart = null; }
+  if (bot.equity.length < 2 || typeof Chart === "undefined") return;
+  botEquityChart = new Chart(canvas, {
+    type: "line",
+    data: {
+      labels: bot.equity.map(p => fdateShort(p.date)),
+      datasets: [{ data: bot.equity.map(p => p.value), borderColor: "#ffb000",
+        backgroundColor: "rgba(255,176,0,0.08)", borderWidth: 2, pointRadius: 0, tension: 0.15, fill: true }],
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: { legend: { display: false }, tooltip: { callbacks: { label: ctx => fnum(ctx.parsed.y) + " €" } } },
+      scales: {
+        x: { ticks: { color: "#7b8794", maxTicksLimit: 6, font: { family: "'IBM Plex Mono', monospace", size: 10 } }, grid: { color: "#1a2028" } },
+        y: { ticks: { color: "#7b8794", font: { family: "'IBM Plex Mono', monospace", size: 10 } }, grid: { color: "#1a2028" } },
+      },
+    },
+  });
+}
+
+// Explique en clair ce que le bot a appris — sinon les multiplicateurs ne veulent rien dire.
+function botLearnExplain(f) {
+  const bouts = [];
+  if (f.n < bot.config.learnMinTrades) {
+    bouts.push(`neutre — ${f.n}/${bot.config.learnMinTrades} trades avant d'apprendre`);
+  } else {
+    if (f.stopMult > 1.02) bouts.push(`stop élargi ×${fnum(f.stopMult)} — ${Math.round(f.stopRate * 100)} % de stops touchés, on sortait sur du bruit`);
+    else if (f.stopMult < 0.98) bouts.push(`stop resserré ×${fnum(f.stopMult)} — seulement ${Math.round(f.stopRate * 100)} % de stops touchés`);
+    if (f.rrMult > 1.02) bouts.push(`cible relevée ×${fnum(f.rrMult)} — souvent gagnant mais gains trop petits`);
+    else if (f.rrMult < 0.98) bouts.push(`cible abaissée ×${fnum(f.rrMult)} — cible rarement atteinte`);
+    if (f.qualityAdj > 0) bouts.push(`seuil d'achat +${f.qualityAdj} points — famille en perte`);
+  }
+  return bouts.length ? bouts.join(" · ") : "réglages conformes, aucun correctif";
+}
+
+function renderBotLearn() {
+  const el = document.getElementById("bot-learn");
+  if (!el) return;
+  const familles = Object.keys(bot.learn || {});
+  if (!familles.length) {
+    el.innerHTML = `<p class="analysis-empty">Aucune famille observée pour l'instant. Le bot classe ses trades par marché et volatilité (ex. « US:forte ») et ajuste ses réglages après ${bot.config.learnMinTrades} trades clôturés.</p>`;
+    return;
+  }
+  const rows = familles.sort().map(k => {
+    const f = bot.learn[k];
+    return `<tr>
+      <td class="card-title">${esc(k)}</td>
+      <td class="num" data-label="Trades">${f.n}</td>
+      <td class="num" data-label="Réussite">${Math.round((f.winRate || 0) * 100)} %</td>
+      <td class="num" data-label="Stops">${Math.round((f.stopRate || 0) * 100)} %</td>
+      <td data-label="Correctifs">${esc(botLearnExplain(f))}</td>
+    </tr>`;
+  }).join("");
+  el.innerHTML = `<div class="table-wrap"><table class="data-table"><thead><tr>
+      <th>Famille</th><th class="num">Trades</th><th class="num">Réussite</th><th class="num">Stops</th><th>Correctifs appliqués</th>
+    </tr></thead><tbody>${rows}</tbody></table></div>
+    <p class="hint">${bot.config.learnEnabled ? "Apprentissage actif" : "Apprentissage désactivé — les statistiques restent affichées, aucun correctif n'est appliqué"}. Chaque recalcul déplace un multiplicateur de 10 % au plus, borné entre 0,70 et 1,30.</p>`;
+}
+
+function renderBotLog() {
+  const el = document.getElementById("bot-log");
+  if (!el) return;
+  if (!bot.log.length) {
+    el.innerHTML = `<p class="analysis-empty">Le journal se remplira à la première évaluation.</p>`;
+    return;
+  }
+  el.innerHTML = bot.log.slice(0, 40).map(l => {
+    const heure = new Date(l.ts).toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" });
+    return `<div class="bot-log-row">
+      <span class="bot-log-time">${esc(heure)}</span>
+      <span class="bot-log-kind ${esc(l.kind)}">${esc(l.kind)}</span>
+      <span>${esc(l.msg)}</span>
+    </div>`;
+  }).join("");
+}
+
 function renderBot() {
   const actions = document.getElementById("bot-actions");
   const summary = document.getElementById("bot-summary");
@@ -5163,56 +5389,59 @@ function renderBot() {
     ? `<button class="btn btn-accent" id="btn-bot-run">Évaluer maintenant</button><button class="btn btn-ghost" id="btn-bot-reset">Réinitialiser</button>`
     : `<button class="btn btn-accent" id="btn-bot-start">▶ Démarrer le bot</button>`;
 
+  renderBotSession();
+
   if (!bot.started) {
-    summary.innerHTML = `<p class="analysis-empty">Le bot est à l'arrêt. Cliquez « Démarrer » : il investira ${fnum(bot.config.capital)} € virtuels dans les meilleurs titres de votre dernier scan marché, avec stop-loss et prise de bénéfice adaptatifs.</p>`;
+    summary.innerHTML = `<p class="analysis-empty">Le bot est à l'arrêt. Cliquez « Démarrer » : il investira ${fnum(bot.config.capital)} € virtuels dans les meilleurs titres de votre dernier scan marché. Chaque position risque ${fnum(bot.config.riskPerTradePct)} % du capital, avec stop suiveur, prise partielle et horizon calculés automatiquement pour chaque titre.</p>`;
     posEl.innerHTML = ""; histEl.innerHTML = "";
   } else {
     const total = botPortfolioValue();
     const perf = (total / bot.config.capital - 1) * 100;
-    const closed = bot.history.length;
-    const wins = bot.history.filter(h => h.pnl > 0).length;
-    const winRate = closed ? Math.round((wins / closed) * 100) : 0;
     summary.innerHTML = `<dl class="impact-grid">
       <div><dt>Valeur du portefeuille</dt><dd class="${pctClass(perf)}">${fnum(total)} €</dd></div>
       <div><dt>Performance</dt><dd class="${pctClass(perf)}">${fpct(perf)}</dd></div>
       <div><dt>Cash disponible</dt><dd>${fnum(bot.cash)} €</dd></div>
       <div><dt>Positions ouvertes</dt><dd>${bot.positions.length}</dd></div>
-      <div><dt>Trades clôturés</dt><dd>${closed}</dd></div>
-      <div><dt>Trades gagnants</dt><dd>${winRate} %</dd></div>
     </dl>
-    <p class="fund-caveat">Stops/cibles évalués sur les clôtures quotidiennes ; réévaluation au score courant. Simulation, pas un conseil.</p>`;
+    ${renderBotExposure(total)}
+    <p class="fund-caveat">Sorties évaluées sur les clôtures quotidiennes hors séance, en direct quand le marché du titre est ouvert. Frais ${fnum(bot.config.feePct)} % et slippage ${fnum(bot.config.slipPct)} % simulés. Jours fériés non gérés. Simulation, pas un conseil.</p>`;
 
     if (bot.positions.length === 0) {
-      posEl.innerHTML = `<p class="analysis-empty">Aucune position ouverte. Lancez/enrichissez un scan marché puis « Évaluer maintenant » pour que le bot achète.</p>`;
+      posEl.innerHTML = `<p class="analysis-empty">Aucune position ouverte. Lancez/enrichissez un scan marché puis « Évaluer maintenant » — le bot n'achète que sur les marchés ouverts.</p>`;
     } else {
       const rows = bot.positions.map(p => {
         const price = botCurrentPrice(p.ticker, p.entryPrice);
         const chg = (price / p.entryPrice - 1) * 100;
-        const stopP = p.entryPrice * (1 - p.stopPct / 100);
-        const tgtP = p.entryPrice * (1 + p.targetPct / 100);
-        const e = cache[p.ticker] || marketCache[p.ticker];
-        const score = (e && e.score != null) ? computeGlobalScore(e) : null;
+        const stopInitial = p.entryPrice * (1 - p.stopPct / 100);
+        const suiveurArme = p.stopLevel > stopInitial + 1e-9;
+        const cible = p.entryPrice * (1 + p.targetPct / 100);
+        const restants = Math.max(0, Math.ceil(p.horizonDays - botAgeDays(p.entryDate)));
         return `<tr>
           <td class="card-title"><span class="cell-ticker">${esc(p.ticker)}</span></td>
+          <td data-label="Famille">${esc(p.family)}</td>
           <td class="num" data-label="Achat">${fnum(p.entryPrice)}</td>
           <td class="num" data-label="Cours">${fnum(price)}</td>
           <td class="num ${pctClass(chg)}" data-label="+/−">${fpct(chg)}</td>
-          <td class="num" data-label="Stop">${fnum(stopP)}</td>
-          <td class="num" data-label="Cible">${fnum(tgtP)}</td>
-          <td class="num" data-label="Score">${score == null ? "—" : score}</td>
+          <td class="num" data-label="Stop">${fnum(p.stopLevel)}${suiveurArme ? ` <span class="bot-trail" title="Stop suiveur armé">↑</span>` : ""}</td>
+          <td class="num" data-label="Cible">${p.scaledOut ? "—" : fnum(cible)}</td>
+          <td data-label="Partiel">${p.scaledOut ? "pris" : "—"}</td>
+          <td class="num" data-label="Jours restants">${restants}</td>
           <td class="actions-col"><button class="btn btn-small btn-ghost btn-danger js-bot-sell" data-ticker="${esc(p.ticker)}">Vendre</button></td>
         </tr>`;
       }).join("");
       posEl.innerHTML = `<div class="table-wrap"><table class="data-table"><thead><tr>
-        <th>Ticker</th><th class="num">Achat</th><th class="num">Cours</th><th class="num">+/−</th><th class="num">Stop</th><th class="num">Cible</th><th class="num">Score</th><th class="actions-col">Action</th>
-        </tr></thead><tbody>${rows}</tbody></table></div>`;
+        <th>Ticker</th><th>Famille</th><th class="num">Achat</th><th class="num">Cours</th><th class="num">+/−</th>
+        <th class="num">Stop</th><th class="num">Cible</th><th>Partiel</th><th class="num">Jours</th><th class="actions-col">Action</th>
+        </tr></thead><tbody>${rows}</tbody></table></div>
+        <p class="hint">Un « ↑ » signale un stop suiveur armé : il a remonté au-dessus du stop initial et ne redescendra plus.</p>`;
     }
 
     histEl.innerHTML = bot.history.length
       ? `<div class="table-wrap"><table class="data-table"><thead><tr>
-          <th>Ticker</th><th class="num">Achat</th><th class="num">Vente</th><th class="num">P&L</th><th class="num">%</th><th>Raison</th>
+          <th>Ticker</th><th>Famille</th><th class="num">Achat</th><th class="num">Vente</th><th class="num">P&L</th><th class="num">%</th><th>Raison</th>
         </tr></thead><tbody>${bot.history.map(h => `<tr>
           <td class="card-title"><span class="cell-ticker">${esc(h.ticker)}</span></td>
+          <td data-label="Famille">${esc(h.family || "—")}</td>
           <td class="num" data-label="Achat">${fnum(h.entryPrice)}</td>
           <td class="num" data-label="Vente">${fnum(h.exitPrice)}</td>
           <td class="num ${pctClass(h.pnl)}" data-label="P&L">${fnum(h.pnl)} €</td>
@@ -5222,9 +5451,14 @@ function renderBot() {
       : `<p class="analysis-empty">Aucun trade clôturé pour l'instant.</p>`;
   }
 
+  renderBotStats();
+  renderBotLearn();
+  renderBotLog();
+
   cfgEl.innerHTML = BOT_CONFIG_FIELDS.map(([k, label, step]) =>
     `<label>${esc(label)} <input type="number" class="js-bot-cfg" data-key="${k}" step="${step}" value="${bot.config[k]}"></label>`
-  ).join("");
+  ).join("")
+  + `<label class="compare-chk"><input type="checkbox" class="js-bot-cfg" data-key="learnEnabled" ${bot.config.learnEnabled ? "checked" : ""}> Apprentissage actif</label>`;
 }
 
 document.getElementById("panel-bot").addEventListener("click", e => {
@@ -5244,6 +5478,13 @@ document.getElementById("panel-bot").addEventListener("change", e => {
   if (key === "autoLoop" || key === "loopMinutes") botScheduleNext();
   renderBot();
 });
+
+// Chart.js dimensionne son canvas au moment du rendu : si la section était repliée
+// (ou la fenêtre d'une autre taille), on le redessine à l'ouverture.
+const botEquityDetails = document.getElementById("bot-equity-canvas").closest("details");
+if (botEquityDetails) {
+  botEquityDetails.addEventListener("toggle", () => { if (botEquityDetails.open) renderBotEquityChart(); });
+}
 
 renderBot();
 
