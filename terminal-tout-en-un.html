@@ -1895,11 +1895,12 @@ function botStart() {
   bot.positions = []; bot.history = []; bot.log = []; bot.equity = []; bot.learn = {};
   saveBot();
   if (typeof renderBot === "function") renderBot();
-  runBot();
+  runBot().finally(() => { if (typeof botScheduleNext === "function") botScheduleNext(); });
 }
 
 function botReset() {
   if (!window.confirm("Réinitialiser le bot ? Positions, historique, journal et apprentissage seront effacés.")) return;
+  if (typeof botStopTimer === "function") botStopTimer();
   bot.started = false; bot.startDate = null;
   bot.cash = bot.config.capital;
   bot.positions = []; bot.history = []; bot.log = []; bot.equity = []; bot.learn = {};
@@ -4177,7 +4178,48 @@ document.getElementById("btn-market-enrich").addEventListener("click", enrichMar
 
 renderMarketResults(); // affichage initial depuis le cache existant (watchlist déjà analysée, etc.)
 loadMarketCache(); // repeuple le cache marché depuis IndexedDB (best-effort)
-if (bot.started) { setTimeout(() => runBot().catch(() => {}), 1500); } // laisse le cache marché se charger d'abord
+/* ---------- boucle intraday du bot ----------
+ * Pas de serveur 24/7 : le bot ne tourne que quand l'app est ouverte. Tant qu'un
+ * marché est ouvert et que l'onglet est visible, on réévalue toutes les
+ * `loopMinutes`. Hors séance, on se replanifie à la prochaine ouverture (plafonné
+ * à 30 min pour rester simple). Onglet en arrière-plan → timer suspendu.
+ * ------------------------------------------------------------------------- */
+
+let botTimer = null;
+let botNextRunAt = null;  // Date de la prochaine évaluation, ou null si la boucle est à l'arrêt
+
+function botStopTimer() {
+  if (botTimer) { clearTimeout(botTimer); botTimer = null; }
+  botNextRunAt = null;
+}
+
+function botScheduleNext() {
+  botStopTimer();
+  if (!bot.started || !bot.config.autoLoop) return;
+  if (document.visibilityState !== "visible") return;
+
+  let delayMs;
+  if (botOpenMarkets().size > 0) {
+    delayMs = Math.max(1, bot.config.loopMinutes) * 60 * 1000;
+  } else {
+    const next = Math.min(botNextOpen("EU"), botNextOpen("US"), botNextOpen("ASIA"));
+    delayMs = Math.min(next || 30 * 60 * 1000, 30 * 60 * 1000);
+  }
+  botNextRunAt = new Date(Date.now() + delayMs);
+  botTimer = setTimeout(async () => {
+    try { await runBot(); } catch (_) { /* best-effort : on retentera au prochain tour */ }
+    botScheduleNext();
+  }, delayMs);
+}
+
+if (bot.started) {
+  setTimeout(() => runBot().catch(() => {}).finally(botScheduleNext), 1500); // laisse le cache marché se charger d'abord
+}
+
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") botScheduleNext();
+  else botStopTimer();
+});
 recordPerfSnapshot(); // point de performance du jour (si positions)
 
 /* ============================= FILTRES & TRI — CÂBLAGE ============================= */
@@ -4703,10 +4745,14 @@ document.getElementById("panel-bot").addEventListener("click", e => {
 });
 document.getElementById("panel-bot").addEventListener("change", e => {
   const inp = e.target.closest(".js-bot-cfg");
-  if (inp) {
-    const v = Number(inp.value);
-    if (isFinite(v)) { bot.config[inp.dataset.key] = v; saveBot(); }
-  }
+  if (!inp) return;
+  const key = inp.dataset.key;
+  const value = inp.type === "checkbox" ? inp.checked : Number(inp.value);
+  if (inp.type !== "checkbox" && !isFinite(value)) return;
+  bot.config[key] = value;
+  saveBot();
+  if (key === "autoLoop" || key === "loopMinutes") botScheduleNext();
+  renderBot();
 });
 
 renderBot();
