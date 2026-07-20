@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "terminal-boursier",
+      "runtimeExecutable": "C:\\Users\\amagu\\AppData\\Local\\Programs\\Python\\Python311\\python.exe",
+      "runtimeArgs": ["-X", "utf8", "server.py"],
+      "port": 8750
+    }
+  ]
+}
