@@ -351,6 +351,15 @@ th.sortable:hover { color: var(--amber); }
 .bot-settings summary { cursor: pointer; color: var(--text-dim); font-size: 12px; text-transform: uppercase; letter-spacing: 1px; }
 .bot-settings .filter-panel { margin-top: 10px; }
 #bot-positions, #bot-history { margin-bottom: 8px; }
+/* Tableau des indicateurs clés (bloc fondamental) */
+.fund-metrics-title { font-size: 13px; text-transform: uppercase; letter-spacing: 1px; color: var(--text-dim); margin: 14px 0 6px; }
+.fund-metrics .fund-threshold { color: var(--text-dim); font-size: 11px; }
+.fund-dot { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 11px; font-weight: 700; }
+.fund-dot.good { background: rgba(46, 204, 113, 0.15); color: var(--green); }
+.fund-dot.mid  { background: rgba(255, 176, 0, 0.15);  color: var(--amber); }
+.fund-dot.bad  { background: rgba(255, 77, 77, 0.15);  color: var(--red); }
+.fund-dot.none { background: transparent; color: var(--text-dim); font-weight: 400; }
+
 .bot-session { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; margin-bottom: 12px;
   padding: 8px 10px; border: 1px solid var(--border); border-radius: 4px; font-size: 12px; }
 .bot-session .sess { font-family: var(--mono); }
@@ -4499,10 +4508,72 @@ function buildFundamentalStatsHtml(entry) {
       <div class="fund-score-badge fund-score-global"><span class="fund-score-num">${global}</span><span class="fund-score-cap">Score global /100</span><span class="fund-verdict">${Math.round(weightTech*100)}% tech / ${Math.round((1-weightTech)*100)}% fonda</span></div>
     </div>
     ${pillars}
+    ${buildKeyMetricsTable(f, (entry.ind || {}).price)}
     ${dividendBlock}
     ${grid}
     <p class="fund-caveat">Seuils de valorisation absolus, non ajustés par secteur : à interpréter avec le contexte du secteur. Analyse descriptive, pas un conseil.</p>
   </div>`;
+}
+
+/* Tableau des indicateurs clés : valeur, appréciation colorée et rappel du seuil.
+ * La pastille suit le sous-score (pas la valeur brute), donc « bas » et « haut »
+ * vont dans le bon sens selon l'indicateur. */
+function fundDot(score) {
+  if (score === null || score === undefined) return `<span class="fund-dot none">—</span>`;
+  const cls = score >= 0.66 ? "good" : score >= 0.33 ? "mid" : "bad";
+  const mot = score >= 0.66 ? "Bien" : score >= 0.33 ? "Moyen" : "Faible";
+  return `<span class="fund-dot ${cls}">${mot}</span>`;
+}
+
+function buildKeyMetricsTable(f, price) {
+  const consensus = fundHasConsensus(f);
+  const nbAn = (f.numberOfAnalystOpinions != null && isFinite(f.numberOfAnalystOpinions))
+    ? Math.round(f.numberOfAnalystOpinions) : 0;
+
+  const fcf = fcfYield(f);
+  const nd = netDebt(f);
+  const ndE = netDebtToEbitda(f);
+  const up = targetUpsidePct(f, price);
+  const trend = epsTrendRatio(f);
+
+  const val = (x, fmt) => (x === null || x === undefined || !isFinite(x)) ? "—" : fmt(x);
+  const millions = (x) => {
+    const abs = Math.abs(x);
+    if (abs >= 1e9) return `${fnum(x / 1e9)} Md`;
+    if (abs >= 1e6) return `${fnum(x / 1e6)} M`;
+    return fnum(x);
+  };
+
+  const lignes = [
+    ["PEG", val(f.pegRatio, fnum), f.pegRatio === null || f.pegRatio <= 0 ? null : piecewise(f.pegRatio, [[1, 1], [2, 0.5], [3, 0]]),
+      "Inférieur à 1 : croissance payée bon marché"],
+    ["FCF Yield", val(fcf, x => `${fnum(x * 100)} %`), scoreFcfYield(fcf),
+      "Supérieur à 7 % : bien — inférieur à 2 % : faible"],
+    ["VE/EBITDA", val(f.enterpriseToEbitda, fnum), f.enterpriseToEbitda === null || f.enterpriseToEbitda <= 0 ? null : piecewise(f.enterpriseToEbitda, [[8, 1], [12, 0.5], [18, 0]]),
+      "Moins de 8 : bien — 9 à 12 : moyen — au-delà : cher"],
+    ["BNA (résultat net)", trend === null ? "—" : (() => { const n = Math.round(trend * 3); return `${n}/3 exercice${n > 1 ? "s" : ""} en hausse`; })(), trend,
+      "Progression régulière : bon signe"],
+    ["Dette nette", nd === null ? "—" : `${millions(nd)}${f.currency ? " " + esc(f.currency) : ""}${ndE === null ? "" : ` (${fnum(ndE)}× EBITDA)`}`,
+      scoreNetDebtToEbitda(ndE), "Négative : trésorerie excédentaire, très positif"],
+    ["Avis des analystes", consensus ? `${esc(f.recommendationKey || "—")} (${fnum(f.recommendationMean)}/5, ${nbAn} analystes)` : (nbAn ? `${nbAn} analyste${nbAn > 1 ? "s" : ""} seulement` : "—"),
+      consensus ? scoreAnalystRating(f.recommendationMean) : null,
+      `Retenu à partir de ${FUND_MIN_ANALYSTS} analystes`],
+    ["Objectif de cours", up === null ? "—" : `${fnum(f.targetMeanPrice)}${f.currency ? " " + esc(f.currency) : ""} (${fpct(up)})`,
+      consensus ? scoreTargetUpside(up) : null,
+      "Potentiel de +30 % ou plus : note maximale"],
+  ];
+
+  const rows = lignes.map(([nom, valeur, score, seuil]) => `<tr>
+    <td class="card-title">${esc(nom)}</td>
+    <td class="num" data-label="Valeur">${valeur}</td>
+    <td data-label="Appréciation">${fundDot(score)}</td>
+    <td class="fund-threshold" data-label="Repère">${esc(seuil)}</td>
+  </tr>`).join("");
+
+  return `<h3 class="fund-metrics-title">Indicateurs clés</h3>
+    <div class="table-wrap"><table class="data-table fund-metrics"><thead><tr>
+      <th>Indicateur</th><th class="num">Valeur</th><th>Appréciation</th><th>Repère</th>
+    </tr></thead><tbody>${rows}</tbody></table></div>`;
 }
 
 // Texte de synthèse fondamental en français, descriptif.
@@ -4516,17 +4587,35 @@ function buildFundamentalText(fund, fundScore) {
   if (f.profitMargins !== null || f.returnOnEquity !== null) {
     parts.push(`Rentabilité : marge nette ${ffrac(f.profitMargins)}, ROE ${ffrac(f.returnOnEquity)}. Note de rentabilité : ${fundScore.pillars.profitability ?? "—"}/100.`);
   }
-  if (f.revenueGrowth !== null || f.earningsGrowth !== null) {
-    parts.push(`Croissance : chiffre d'affaires ${ffrac(f.revenueGrowth)}, bénéfices ${ffrac(f.earningsGrowth)}. Note de croissance : ${fundScore.pillars.growth ?? "—"}/100.`);
+  const trend = epsTrendRatio(f);
+  if (f.revenueGrowth !== null || f.earningsGrowth !== null || trend !== null) {
+    const reg = trend === null ? ""
+      : trend === 1 ? ", résultat net en hausse sur tous les exercices connus"
+      : trend === 0 ? ", résultat net en baisse sur tous les exercices connus"
+      : `, résultat net en hausse sur ${Math.round(trend * 3)} exercice${Math.round(trend * 3) > 1 ? "s" : ""} sur 3`;
+    parts.push(`Croissance : chiffre d'affaires ${ffrac(f.revenueGrowth)}, bénéfices ${ffrac(f.earningsGrowth)}${reg}. Note de croissance : ${fundScore.pillars.growth ?? "—"}/100.`);
   }
   const healthBits = [];
   if (f.debtToEquity !== null) healthBits.push(`dette/capitaux propres ${fnum(f.debtToEquity / 100)}`);
   if (f.currentRatio !== null) healthBits.push(`ratio de liquidité ${fnum(f.currentRatio)}`);
+  const ndE = netDebtToEbitda(f);
+  if (ndE !== null) {
+    healthBits.push(ndE < 0 ? "trésorerie nette excédentaire (dette nette négative)"
+                            : `dette nette à ${fnum(ndE)}× l'EBITDA`);
+  }
   if (healthBits.length) parts.push(`Santé financière : ${healthBits.join(", ")}. Note de santé : ${fundScore.pillars.health ?? "—"}/100.`);
   const paysDiv = (f.dividendYield !== null && f.dividendYield > 0) || (f.dividendRate != null && f.dividendRate > 0);
   if (paysDiv) {
     const sustText = dividendSustainability(f.payoutRatio);
     parts.push(`Dividende : rendement ${ffrac(f.dividendYield)}, distribution ${ffrac(f.payoutRatio)}${sustText ? `, soutenabilité ${sustText}` : ""}.`);
+  }
+  if (fundHasConsensus(f)) {
+    const nb = Math.round(f.numberOfAnalystOpinions);
+    parts.push(`Consensus : ${nb} analystes, avis moyen ${fnum(f.recommendationMean)}/5 (1 = achat fort)`
+      + `${f.targetMeanPrice != null ? `, objectif de cours moyen ${fnum(f.targetMeanPrice)}${f.currency ? " " + f.currency : ""}` : ""}. `
+      + `Opinion de marché, comptée dans la valorisation mais volontairement minoritaire.`);
+  } else if (f.numberOfAnalystOpinions != null && f.numberOfAnalystOpinions > 0) {
+    parts.push(`Consensus : trop peu d'analystes (${Math.round(f.numberOfAnalystOpinions)}) pour être retenu dans le score.`);
   }
   parts.push(`Score fondamental global : ${fundScore.total}/100 → « ${fundScore.verdict} ». Agrégation pondérée des piliers disponibles (valorisation 35 %, rentabilité 30 %, croissance 20 %, santé 15 %).`);
   return parts;
