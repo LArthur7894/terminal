@@ -1831,6 +1831,61 @@ function botQualityAdjFor(ticker, ind, learn) {
   return (fam && fam.qualityAdj) || 0;
 }
 
+/* ============================= BOT V2 — STATISTIQUES ============================= */
+
+// Un point de capital par jour : le dernier de la journée écrase le précédent.
+function botRecordEquity() {
+  const today = new Date().toISOString().slice(0, 10);
+  const value = botPortfolioValue();
+  const dernier = bot.equity[bot.equity.length - 1];
+  if (dernier && dernier.date === today) dernier.value = value;
+  else bot.equity.push({ date: today, value });
+  if (bot.equity.length > 400) bot.equity = bot.equity.slice(-400);
+}
+
+// Statistiques de performance — fonction pure sur l'historique et la courbe de capital.
+function botStats(history, equity) {
+  const n = history.length;
+  const gagnants = history.filter(h => h.pnl > 0);
+  const perdants = history.filter(h => h.pnl <= 0);
+  const sommeGains  = gagnants.reduce((s, h) => s + h.pnl, 0);
+  const sommePertes = Math.abs(perdants.reduce((s, h) => s + h.pnl, 0));
+
+  const winRate      = n ? gagnants.length / n : 0;
+  const profitFactor = sommePertes > 0 ? sommeGains / sommePertes : (sommeGains > 0 ? Infinity : 0);
+  const avgWin       = gagnants.length ? sommeGains / gagnants.length : 0;
+  const avgLoss      = perdants.length ? sommePertes / perdants.length : 0;
+  const expectancy   = n ? (sommeGains - sommePertes) / n : 0;
+
+  const premier = equity[0], dernier = equity[equity.length - 1];
+  const totalPct = (premier && dernier && premier.value > 0) ? (dernier.value / premier.value - 1) * 100 : 0;
+
+  // Drawdown maximum : pire repli depuis un sommet de la courbe.
+  let sommet = -Infinity, pire = 0;
+  for (const p of equity) {
+    if (p.value > sommet) sommet = p.value;
+    if (sommet > 0) pire = Math.max(pire, (sommet - p.value) / sommet);
+  }
+
+  const grouper = (cle) => {
+    const g = {};
+    for (const h of history) {
+      const k = cle(h);
+      if (!k) continue;
+      g[k] = g[k] || { n: 0, pnl: 0, gagnants: 0 };
+      g[k].n++; g[k].pnl += h.pnl; if (h.pnl > 0) g[k].gagnants++;
+    }
+    return g;
+  };
+
+  return {
+    n, totalPct, drawdownPct: pire * 100, winRate, profitFactor, avgWin, avgLoss, expectancy,
+    byMarket: grouper(h => h.family ? String(h.family).split(":")[0] : null),
+    byFamily: grouper(h => h.family),
+    byReason: grouper(h => h.reason),
+  };
+}
+
 /* ============================= BOT V2 — MOTEUR ============================= */
 
 // Valeur totale du portefeuille virtuel (cash + positions au cours courant).
@@ -2075,6 +2130,7 @@ async function runBot() {
     }
 
     if (bot.history.length > 200) bot.history = bot.history.slice(0, 200);
+    botRecordEquity();
     saveBot();
     if (typeof renderBot === "function") renderBot();
   } finally {
@@ -2086,6 +2142,7 @@ function botStart() {
   bot.started = true; bot.startDate = new Date().toISOString();
   bot.cash = bot.config.capital;
   bot.positions = []; bot.history = []; bot.log = []; bot.equity = []; bot.learn = {};
+  botRecordEquity();   // point de départ de la courbe de capital
   saveBot();
   if (typeof renderBot === "function") renderBot();
   runBot().finally(() => { if (typeof botScheduleNext === "function") botScheduleNext(); });
@@ -2277,6 +2334,54 @@ botTest("botQualityAdjFor: correctif retrouvé par famille", () => {
   botAssertEq(botQualityAdjFor("AAPL", { vol: 55 }, learn), 10);
   botAssertEq(botQualityAdjFor("AAPL", { vol: 25 }, learn), 0, "autre bucket, pas de correctif");
   botAssertEq(botQualityAdjFor("MC.PA", { vol: 55 }, learn), 0, "autre marché, pas de correctif");
+});
+
+/* ---------- tests : statistiques ---------- */
+
+botTest("botStats: drawdown maximum", () => {
+  const eq = [{date:"d1",value:100},{date:"d2",value:120},{date:"d3",value:90},{date:"d4",value:110}];
+  botAssertClose(botStats([], eq).drawdownPct, (120 - 90) / 120 * 100, 1e-9);
+});
+
+botTest("botStats: drawdown nul sur une courbe qui ne baisse jamais", () => {
+  const eq = [{date:"d1",value:100},{date:"d2",value:110},{date:"d3",value:130}];
+  botAssertEq(botStats([], eq).drawdownPct, 0);
+});
+
+botTest("botStats: profit factor", () => {
+  const h = [botMkTrade("US:moyenne", 30, "prise partielle"), botMkTrade("US:moyenne", -10, "stop-loss")];
+  botAssertClose(botStats(h, []).profitFactor, 3, 1e-9);
+});
+
+botTest("botStats: performance totale depuis la courbe", () => {
+  const eq = [{date:"d1",value:10000},{date:"d2",value:11500}];
+  botAssertClose(botStats([], eq).totalPct, 15, 1e-9);
+});
+
+botTest("botStats: espérance par trade", () => {
+  const h = [botMkTrade("US:moyenne", 30, "prise partielle"), botMkTrade("US:moyenne", -10, "stop-loss")];
+  botAssertClose(botStats(h, []).expectancy, 10, 1e-9);
+});
+
+botTest("botStats: groupements par marché, famille et raison", () => {
+  const h = [
+    botMkTrade("US:moyenne", 10, "prise partielle"),
+    botMkTrade("EU:faible",  -5, "stop-loss"),
+    botMkTrade("US:moyenne",  2, "réévaluation"),
+  ];
+  const s = botStats(h, []);
+  botAssertEq(s.byMarket.US.n, 2);
+  botAssertEq(s.byMarket.US.gagnants, 2);
+  botAssertEq(s.byFamily["EU:faible"].n, 1);
+  botAssertEq(s.byReason["stop-loss"].n, 1);
+});
+
+botTest("botStats: historique vide ne casse rien", () => {
+  const s = botStats([], []);
+  botAssertEq(s.n, 0);
+  botAssertEq(s.totalPct, 0);
+  botAssertEq(s.drawdownPct, 0);
+  botAssertEq(s.winRate, 0);
 });
 
 /* ---------- tests : journal ---------- */
