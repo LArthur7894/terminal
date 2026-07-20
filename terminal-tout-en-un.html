@@ -1024,11 +1024,16 @@ th.sortable:hover { color: var(--amber); }
               <th class="num" data-sort="global">Global</th>
               <th>Signal</th>
               <th class="num" data-sort="perf1y">Perf. 1 an</th>
+              <th class="num fund-col" data-sort="peg" title="Price/Earnings to Growth — sous 1, la croissance est payée bon marché">PEG</th>
+              <th class="num fund-col" data-sort="fcf" title="Flux de trésorerie libre rapporté à la capitalisation — au-dessus de 7 %, très bien">FCF</th>
+              <th class="num fund-col" data-sort="evEbitda" title="Valeur d'entreprise / EBITDA — sous 8, bon marché">VE/EBITDA</th>
+              <th class="num fund-col" data-sort="netDebt" title="Dette nette rapportée à l'EBITDA — négative, l'entreprise a plus de cash que de dettes">Dette nette</th>
+              <th class="num fund-col" data-sort="upside" title="Écart entre l'objectif de cours moyen des analystes et le cours actuel">Potentiel</th>
               <th class="actions-col">Actions</th>
             </tr>
           </thead>
           <tbody id="market-body">
-            <tr><td colspan="10" class="na">Lancez un scan pour voir les meilleures opportunités du marché.</td></tr>
+            <tr><td colspan="15" class="na">Lancez un scan pour voir les meilleures opportunités du marché.</td></tr>
           </tbody>
         </table>
       </div>
@@ -3034,7 +3039,12 @@ function avgDefined(vals) {
  * et avgDefined savent l'ignorer sans fausser le score.
  * ============================================================================ */
 
-const FUND_MIN_ANALYSTS = 3;   // en dessous, « le consensus » n'en est pas un
+// Nombre minimal d'analystes pour qu'un consensus en soit un.
+// Déclaré en fonction (et non en const) à dessein : `computeFundScore` est appelé par la
+// migration du cache qui s'exécute AVANT cette ligne au chargement. Une const y serait
+// dans sa zone morte temporelle et casserait toute l'app au démarrage ; une déclaration
+// de fonction, elle, est hoistée.
+function fundMinAnalysts() { return 3; }
 
 // Rendement du flux de trésorerie libre, en fraction (0.07 = 7 %).
 function fcfYield(f) {
@@ -3077,7 +3087,7 @@ function epsTrendRatio(f) {
 // Le consensus n'est retenu que s'il repose sur assez d'analystes.
 function fundHasConsensus(f) {
   return !!f && f.numberOfAnalystOpinions != null && isFinite(f.numberOfAnalystOpinions)
-    && f.numberOfAnalystOpinions >= FUND_MIN_ANALYSTS;
+    && f.numberOfAnalystOpinions >= fundMinAnalysts();
 }
 
 /* ---------- barèmes des nouveaux indicateurs (seuils validés) ---------- */
@@ -3615,6 +3625,12 @@ const COLUMN_VALUE = {
   fonda:  e => (e.fundScore ? e.fundScore.total : null),
   global: e => (e.score != null ? computeGlobalScore(e) : null),
   perf1y: e => (e.ind && e.ind.perf ? e.ind.perf.y1 : null),
+  // Fondamentaux avancés : null tant que le titre n'a pas été enrichi (trié en bas).
+  peg:    e => (e.fund ? e.fund.pegRatio : null),
+  fcf:    e => (e.fund ? fcfYield(e.fund) : null),
+  evEbitda: e => (e.fund ? e.fund.enterpriseToEbitda : null),
+  netDebt:  e => (e.fund ? netDebtToEbitda(e.fund) : null),
+  upside:   e => (e.fund && fundHasConsensus(e.fund) ? targetUpsidePct(e.fund, e.ind ? e.ind.price : null) : null),
 };
 
 // Trie une liste selon COLUMN_VALUE[state.col] ; nulls toujours en bas quel que soit le sens.
@@ -4557,7 +4573,7 @@ function buildKeyMetricsTable(f, price) {
       scoreNetDebtToEbitda(ndE), "Négative : trésorerie excédentaire, très positif"],
     ["Avis des analystes", consensus ? `${esc(f.recommendationKey || "—")} (${fnum(f.recommendationMean)}/5, ${nbAn} analystes)` : (nbAn ? `${nbAn} analyste${nbAn > 1 ? "s" : ""} seulement` : "—"),
       consensus ? scoreAnalystRating(f.recommendationMean) : null,
-      `Retenu à partir de ${FUND_MIN_ANALYSTS} analystes`],
+      `Retenu à partir de ${fundMinAnalysts()} analystes`],
     ["Objectif de cours", up === null ? "—" : `${fnum(f.targetMeanPrice)}${f.currency ? " " + esc(f.currency) : ""} (${fpct(up)})`,
       consensus ? scoreTargetUpside(up) : null,
       "Potentiel de +30 % ou plus : note maximale"],
@@ -5007,6 +5023,28 @@ function updateMarketStatusText() {
 // Score de classement : global si le fondamental est présent (enrichi), sinon technique.
 function rankScore(entry) { return entry.fundScore ? computeGlobalScore(entry) : entry.score; }
 
+/* Colonnes fondamentales du scan : « — » tant que le titre n'a pas été enrichi
+ * (bouton « ★ Enrichir le top »). Colorées selon le sous-score, comme dans l'analyse. */
+function marketFundCells(entry) {
+  const f = entry.fund;
+  const LABELS = ["PEG", "FCF", "VE/EBITDA", "Dette nette", "Potentiel"];
+  const cell = (txt, score, label) => {
+    const cls = score == null ? "" : score >= 0.66 ? "pos" : score >= 0.33 ? "" : "neg";
+    return `<td class="num fund-col ${cls}" data-label="${label}">${txt}</td>`;
+  };
+  if (!f) return LABELS.map(l => `<td class="num fund-col na" data-label="${l}">—</td>`).join("");
+
+  const peg = f.pegRatio, ev = f.enterpriseToEbitda;
+  const fcf = fcfYield(f), ndE = netDebtToEbitda(f);
+  const up = fundHasConsensus(f) ? targetUpsidePct(f, entry.ind ? entry.ind.price : null) : null;
+
+  return cell(peg == null ? "—" : fnum(peg), peg == null || peg <= 0 ? null : piecewise(peg, [[1, 1], [2, 0.5], [3, 0]]), LABELS[0])
+    + cell(fcf == null ? "—" : fnum(fcf * 100) + " %", scoreFcfYield(fcf), LABELS[1])
+    + cell(ev == null ? "—" : fnum(ev), ev == null || ev <= 0 ? null : piecewise(ev, [[8, 1], [12, 0.5], [18, 0]]), LABELS[2])
+    + cell(ndE == null ? "—" : fnum(ndE) + "×", scoreNetDebtToEbitda(ndE), LABELS[3])
+    + cell(up == null ? "—" : fpct(up), up == null ? null : scoreTargetUpside(up), LABELS[4]);
+}
+
 function renderMarketTable() {
   const tbody = document.getElementById("market-body");
   let list = marketCandidates
@@ -5021,7 +5059,7 @@ function renderMarketTable() {
   tbody.innerHTML = "";
   if (typeof paintSortIndicators === "function") paintSortIndicators("market-table", "mk");
   if (ranked.length === 0) {
-    tbody.innerHTML = `<tr><td colspan="10" class="na">Aucune valeur ne correspond (lancez un scan, ou assouplissez les filtres).</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="15" class="na">Aucune valeur ne correspond (lancez un scan, ou assouplissez les filtres).</td></tr>`;
     return;
   }
 
@@ -5038,6 +5076,7 @@ function renderMarketTable() {
       <td class="num" data-label="Global">${fs ? computeGlobalScore(m.entry) : "—"}</td>
       <td data-label="Signal"><span class="signal signal-${m.entry.signal.toLowerCase()}">${m.entry.signal}</span></td>
       <td class="num ${pctClass(m.entry.ind.perf.y1)}" data-label="Perf. 1 an">${fpct(m.entry.ind.perf.y1)}</td>
+      ${marketFundCells(m.entry)}
       <td class="actions-col"></td>`;
 
     const actions = tr.querySelector(".actions-col");
