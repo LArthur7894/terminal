@@ -5910,11 +5910,20 @@ const COMPARE_METRICS = [
   ["Score global", e => e.score != null ? computeGlobalScore(e) : null, "high", v => String(v)],
   ["PER", e => e.fund ? e.fund.trailingPE : null, "low", v => fnum(v)],
   ["PER prév.", e => e.fund ? e.fund.forwardPE : null, "low", v => fnum(v)],
+  // Le « meilleur » suit le sens de lecture de chaque indicateur : un PEG bas gagne,
+  // un FCF Yield haut gagne, un avis analyste proche de 1 (achat fort) gagne.
+  ["PEG", e => e.fund ? e.fund.pegRatio : null, "low", v => fnum(v)],
+  ["VE/EBITDA", e => e.fund ? e.fund.enterpriseToEbitda : null, "low", v => fnum(v)],
+  ["FCF Yield", e => e.fund ? fcfYield(e.fund) : null, "high", v => fnum(v * 100) + " %"],
   ["Rendement dividende", e => e.fund ? e.fund.dividendYield : null, "high", v => ffrac(v)],
   ["Marge nette", e => e.fund ? e.fund.profitMargins : null, "high", v => ffrac(v)],
   ["ROE", e => e.fund ? e.fund.returnOnEquity : null, "high", v => ffrac(v)],
   ["Croissance CA", e => e.fund ? e.fund.revenueGrowth : null, "high", v => ffrac(v)],
+  ["Résultat net en hausse", e => e.fund ? epsTrendRatio(e.fund) : null, "high", v => `${Math.round(v * 3)}/3`],
   ["Dette / cap. propres", e => e.fund && e.fund.debtToEquity != null ? e.fund.debtToEquity / 100 : null, "low", v => fnum(v)],
+  ["Dette nette / EBITDA", e => e.fund ? netDebtToEbitda(e.fund) : null, "low", v => fnum(v) + "×"],
+  ["Avis analystes (1=achat)", e => (e.fund && fundHasConsensus(e.fund)) ? e.fund.recommendationMean : null, "low", v => fnum(v) + "/5"],
+  ["Potentiel vs objectif", e => (e.fund && fundHasConsensus(e.fund)) ? targetUpsidePct(e.fund, e.ind ? e.ind.price : null) : null, "high", v => fpct(v)],
   ["Capitalisation", e => e.fund ? e.fund.marketCap : null, "high", (v, e) => fmtMarketCap(v, e.fund && e.fund.currency)],
 ];
 
