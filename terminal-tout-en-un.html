@@ -1617,9 +1617,10 @@ function botProfile(entry, cfg, learn, portfolioValue, cash, marketExposure = 0)
   amount = Math.min(amount, capPos, margeMarche, Math.max(0, cash));
 
   const horizonDays = botHorizonDays(volBucket);
-  const why = `score ${Math.round(score)}, volatilité ${vol.toFixed(0)} % (famille ${family}). `
-    + `Stop ${stopPct.toFixed(1)} %, cible ${targetPct.toFixed(1)} % (RR ${rr.toFixed(1)}). `
-    + `Mise ${Math.round(amount)} € = ${cfg.riskPerTradePct} % de risque du capital.`;
+  const dec = (x, n) => x.toFixed(n).replace(".", ",");   // séparateur décimal français
+  const why = `score ${Math.round(score)}, volatilité ${Math.round(vol)} % (famille ${family}). `
+    + `Stop ${dec(stopPct, 1)} %, cible ${dec(targetPct, 1)} % (RR ${dec(rr, 1)}). `
+    + `Mise ${Math.round(amount)} € = ${dec(cfg.riskPerTradePct, 1)} % de risque du capital.`;
 
   return { market, volBucket, family, stopPct, trailPct, rr, targetPct, amount, horizonDays, why };
 }
@@ -1748,6 +1749,13 @@ function botMigrateV1(raw) {
 let bot = botMigrateV1(lsGet(LS.bot, null));
 function saveBot() { lsSet(LS.bot, bot); }
 
+// Journal des décisions : 150 entrées, les plus récentes en tête.
+// kind ∈ achat | vente | partiel | ignoré | info
+function botLog(kind, ticker, msg) {
+  bot.log.unshift({ ts: new Date().toISOString(), kind, ticker, msg });
+  if (bot.log.length > 150) bot.log = bot.log.slice(0, 150);
+}
+
 /* ============================= BOT V2 — MOTEUR ============================= */
 
 // Valeur totale du portefeuille virtuel (cash + positions au cours courant).
@@ -1773,6 +1781,7 @@ function botSellManual(ticker) {
   bot.history.unshift({ ticker, family: pos.family, entryDate: pos.entryDate, entryPrice: pos.entryPrice,
     exitDate: new Date().toISOString().slice(0, 10), exitPrice: price, qty: pos.qty,
     pnl: cashIn - pos.entryPrice * pos.qty, pnlPct: (net / pos.entryPrice - 1) * 100, reason: "manuelle" });
+  botLog("vente", ticker, `VENTE MANUELLE ${ticker} à ${fnum(price)}, ${fpct((net / pos.entryPrice - 1) * 100)} net de frais.`);
   bot.positions.splice(idx, 1);
   saveBot();
   if (typeof renderBot === "function") renderBot();
@@ -1845,6 +1854,17 @@ async function runBot() {
     const today = new Date().toISOString().slice(0, 10);
     const openMarkets = botOpenMarkets();
 
+    // Les refus ne sont journalisés qu'une fois par cause et par évaluation :
+    // sinon la boucle de 15 min noierait le journal.
+    const refusJournalises = new Set();
+    const refuser = (cause) => {
+      if (refusJournalises.has(cause)) return;
+      refusJournalises.add(cause);
+      botLog("ignoré", null, cause);
+    };
+
+    if (openMarkets.size === 0) botLog("info", null, "Hors séance — rattrapage des clôtures seulement, aucun achat.");
+
     // a) rafraîchir les positions détenues (best-effort : une panne n'interrompt pas l'évaluation)
     for (const pos of bot.positions) {
       const e = cache[pos.ticker] || marketCache[pos.ticker];
@@ -1905,10 +1925,17 @@ async function runBot() {
           exitDate: exit.date, exitPrice: exit.price, qty: soldQty,
           pnl: cashIn - cur.entryPrice * soldQty,            // net de frais et de slippage
           pnlPct: (net / cur.entryPrice - 1) * 100, reason: exit.reason });
+
+        const pctNet = (net / cur.entryPrice - 1) * 100;
         if (exit.partial) {
           cur.qty -= soldQty;
           cur.scaledOut = true;
+          botLog("partiel", cur.ticker, `PARTIEL ${cur.ticker} — cible ${fpct(cur.targetPct)} atteinte, `
+            + `50 % vendus à ${fnum(exit.price)}, stop suiveur à ${fnum(cur.stopLevel)}.`);
           stillOpen.push(cur);
+        } else {
+          botLog("vente", cur.ticker, `VENTE ${cur.ticker} — ${exit.reason} à ${fnum(exit.price)}, `
+            + `${fpct(pctNet)} net de frais.`);
         }
       } else {
         stillOpen.push(cur);
@@ -1929,17 +1956,23 @@ async function runBot() {
     const candidates = Object.keys(marketCache)
       .map(t => ({ t, e: marketCache[t] }))
       .filter(x => x.e && x.e.ind && x.e.ind.price > 0 && !held.has(x.t) && x.e.score != null
-                   && computeGlobalScore(x.e) >= cfg.qualityMin
-                   && openMarkets.has(botMarketOf(x.t)))
+                   && computeGlobalScore(x.e) >= cfg.qualityMin)
       .sort((a, b) => computeGlobalScore(b.e) - computeGlobalScore(a.e));
 
     for (const cand of candidates) {
       const market = botMarketOf(cand.t);
+      if (!openMarkets.has(market)) { refuser(`Marché ${market} fermé — achats suspendus.`); continue; }
+
       const marketExp = exposureByMarket[market] || 0;
       const prof = botProfile({ ticker: cand.t, ...cand.e }, cfg, bot.learn, portfolioValue, bot.cash, marketExp);
-      if (prof.amount < 1) continue;
+      if (prof.amount < 1) {
+        const plafondMarche = portfolioValue * (cfg.maxMarketPct / 100);
+        if (marketExp >= plafondMarche - 1) refuser(`Plafond marché ${market} atteint (${cfg.maxMarketPct} %).`);
+        else refuser("Cash insuffisant pour ouvrir une nouvelle position.");
+        continue;
+      }
       const { filled, cashOut, qty } = botApplyEntryCost(cand.e.ind.price, prof.amount, cfg);
-      if (cashOut > bot.cash) continue;
+      if (cashOut > bot.cash) { refuser("Cash insuffisant pour ouvrir une nouvelle position."); continue; }
       bot.cash -= cashOut;
       bot.positions.push({
         ticker: cand.t, market: prof.market, family: prof.family,
@@ -1953,6 +1986,7 @@ async function runBot() {
       });
       exposureByMarket[market] = marketExp + prof.amount;
       held.add(cand.t);
+      botLog("achat", cand.t, `ACHAT ${cand.t} — ${prof.why}`);
     }
 
     if (bot.history.length > 200) bot.history = bot.history.slice(0, 200);
@@ -2076,6 +2110,18 @@ botTest("botApplyTick: après le partiel, le suiveur reste actif", () => {
 botTest("botApplyTick: prix invalide ignoré", () => {
   botAssertEq(botApplyTick(botMkPos(), 0, "d1").exit, null);
   botAssertEq(botApplyTick(botMkPos(), NaN, "d1").exit, null);
+});
+
+/* ---------- tests : journal ---------- */
+
+botTest("botLog: plafonné à 150 entrées, plus récent en tête", () => {
+  const sauvegarde = bot.log;
+  bot.log = [];
+  for (let i = 0; i < 200; i++) botLog("info", null, `msg ${i}`);
+  botAssertEq(bot.log.length, 150);
+  botAssertEq(bot.log[0].msg, "msg 199", "le plus récent doit être en tête");
+  botAssertEq(bot.log[149].msg, "msg 50", "les plus anciens sont écartés");
+  bot.log = sauvegarde;
 });
 
 /* ---------- tests : frais et slippage ---------- */
