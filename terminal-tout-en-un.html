@@ -1308,7 +1308,7 @@ for (const ticker of Object.keys(cache)) {
   // Champs fondamentaux absents sur les entrées anciennes : normaliser à null,
   // et recalculer fundScore si des fondamentaux sont déjà stockés.
   if (cache[ticker].fund === undefined) cache[ticker].fund = null;
-  cache[ticker].fundScore = computeFundScore(cache[ticker].fund);
+  cache[ticker].fundScore = computeFundScore(cache[ticker].fund, (cache[ticker].ind || {}).price);
 }
 lsSet(LS.cache, cache);
 
@@ -1371,7 +1371,7 @@ async function loadMarketCache() {
       e = { ...e, ind, score, signal: signalFromScore(score) };
     }
     if (e.fund === undefined) e.fund = null;
-    e.fundScore = computeFundScore(e.fund);
+    e.fundScore = computeFundScore(e.fund, (e.ind || {}).price);
     marketCache[sym] = e;
   }
   renderMarketResults();
@@ -3094,7 +3094,7 @@ function scoreTargetUpside(v) {
 
 // Barèmes (seuils absolus). Chaque métrique → sous-score 0..1.
 // Valorisation : plus c'est bas, mieux c'est (PER/PEG/PB négatifs = perte/anomalie → 0).
-function scoreValuation(f) {
+function scoreValuation(f, currentPrice = null) {
   const pe = f.trailingPE;
   const peScore = (pe === null) ? null : (pe <= 0 ? 0 : piecewise(pe, [[8, 1], [10, 1], [25, 0.5], [50, 0]]));
   const fpe = f.forwardPE;
@@ -3104,8 +3104,15 @@ function scoreValuation(f) {
   const pb = f.priceToBook;
   const pbScore = (pb === null) ? null : (pb <= 0 ? 0 : piecewise(pb, [[1, 1], [3, 0.5], [6, 0]]));
   const ev = f.enterpriseToEbitda;
-  const evScore = (ev === null) ? null : (ev <= 0 ? 0 : piecewise(ev, [[8, 1], [15, 0.5], [25, 0]]));
-  return avgDefined([peScore, fpeScore, pegScore, pbScore, evScore]);
+  // Resserré : < 8 bien, 9–12 moyen, au-delà moins bien.
+  const evScore = (ev === null) ? null : (ev <= 0 ? 0 : piecewise(ev, [[8, 1], [12, 0.5], [18, 0]]));
+  const fcfScore = scoreFcfYield(fcfYield(f));
+  // Consensus : opinion de marché, retenue seulement si assez d'analystes la portent.
+  // Deux sous-scores sur huit, soit ~9 % du score total — présents sans dominer.
+  const consensus = fundHasConsensus(f);
+  const ratingScore = consensus ? scoreAnalystRating(f.recommendationMean) : null;
+  const upsideScore = consensus ? scoreTargetUpside(targetUpsidePct(f, currentPrice)) : null;
+  return avgDefined([peScore, fpeScore, pegScore, pbScore, evScore, fcfScore, ratingScore, upsideScore]);
 }
 
 // Rentabilité : plus c'est haut, mieux c'est (marges/ROE/ROA en fraction : 0.25 = 25 %).
@@ -3127,7 +3134,10 @@ function scoreGrowth(f) {
   const rgScore = rg === null ? null : piecewise(rg, [[-0.10, 0], [0, 0.4], [0.25, 1]]);
   const eg = f.earningsGrowth;
   const egScore = eg === null ? null : piecewise(eg, [[-0.10, 0], [0, 0.4], [0.25, 1]]);
-  return avgDefined([rgScore, egScore]);
+  // Régularité du résultat net sur les exercices connus : une progression continue vaut mieux
+  // qu'une seule bonne année. Déjà exprimée sur 0..1, utilisée telle quelle.
+  const trendScore = epsTrendRatio(f);
+  return avgDefined([rgScore, egScore, trendScore]);
 }
 
 // Santé financière + dividende. debtToEquity façon Yahoo en % (150 = 1.5x).
@@ -3136,7 +3146,9 @@ function scoreHealth(f) {
   const deScore = de === null ? null : (de < 0 ? 0 : piecewise(de, [[50, 1], [150, 0.5], [300, 0]]));
   const cr = f.currentRatio;
   const crScore = cr === null ? null : piecewise(cr, [[1, 0.2], [1.5, 0.7], [3, 1]]);
-  let base = avgDefined([deScore, crScore]);
+  // Levier réel : la dette nette rapportée à l'EBITDA. Négative = trésorerie excédentaire.
+  const ndScore = scoreNetDebtToEbitda(netDebtToEbitda(f));
+  let base = avgDefined([deScore, crScore, ndScore]);
   const dy = f.dividendYield; // fraction (0.03 = 3 %) ; == null couvre null ET undefined
   if (base === null && dy != null && isFinite(dy)) base = 0.5; // dividende seul → neutre
   if (base === null) return null;
@@ -3302,10 +3314,10 @@ function fundVerdict(total) {
 }
 
 // Score fondamental /100 : moyenne pondérée des piliers disponibles (poids renormalisés).
-function computeFundScore(fund) {
+function computeFundScore(fund, currentPrice = null) {
   if (!fund) return null;
   const pillars = {
-    valuation: scoreValuation(fund),
+    valuation: scoreValuation(fund, currentPrice),
     profitability: scoreProfitability(fund),
     growth: scoreGrowth(fund),
     health: scoreHealth(fund),
@@ -3374,7 +3386,7 @@ async function analyzeTicker(ticker, button, opts = {}) {
       try { fund = await fetchFundamentals(ticker); }
       catch (e) { fund = null; /* silencieux : l'UI affichera « indisponible » */ }
     }
-    const fundScore = computeFundScore(fund);
+    const fundScore = computeFundScore(fund, ind ? ind.price : null);
 
     store[ticker] = {
       updated: new Date().toISOString(),
@@ -4986,7 +4998,7 @@ async function enrichMarketTop() {
       let fund = null;
       try { fund = await fetchFundamentals(symbol); } catch (e) { fund = null; }
       entry.fund = fund;
-      entry.fundScore = computeFundScore(fund);
+      entry.fundScore = computeFundScore(fund, (entry.ind || {}).price);
       if (cache[symbol] === entry) touchedCache = true; // aussi en watchlist → persister
     }
     done++;
