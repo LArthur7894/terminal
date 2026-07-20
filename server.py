@@ -63,6 +63,12 @@ FUND_URL = ("https://query1.finance.yahoo.com/v10/finance/quoteSummary/{sym}"
 _YAHOO_AUTH = {"cookie": None, "crumb": None}
 _YAHOO_AUTH_LOCK = threading.Lock()
 
+# Quand Yahoo limite durablement l'IP (429 depuis un hébergeur), inutile de refaire trois
+# tentatives espacées à chaque requête : on mémorise l'échec quelques minutes et on répond
+# tout de suite, plutôt que de faire patienter l'utilisateur 5 s pour la même erreur.
+_AUTH_FAIL = {"until": 0.0, "reason": ""}
+_AUTH_FAIL_TTL = 300  # secondes
+
 
 # Sources de cookie, essayées dans l'ordre. fc.yahoo.com suffit depuis une IP résidentielle
 # mais reste souvent muet depuis un centre de données (cas de Render) : on retombe alors sur
@@ -153,7 +159,15 @@ def _get_yahoo_crumb(force_refresh=False):
     """Renvoie (cookie, crumb), en régénérant si absent ou si force_refresh."""
     with _YAHOO_AUTH_LOCK:
         if force_refresh or not _YAHOO_AUTH["crumb"]:
-            _YAHOO_AUTH["cookie"], _YAHOO_AUTH["crumb"] = _fetch_yahoo_auth()
+            if time.time() < _AUTH_FAIL["until"]:
+                raise RuntimeError(_AUTH_FAIL["reason"])   # échec récent : on ne réessaie pas tout de suite
+            try:
+                _YAHOO_AUTH["cookie"], _YAHOO_AUTH["crumb"] = _fetch_yahoo_auth()
+            except Exception as e:
+                _AUTH_FAIL["until"] = time.time() + _AUTH_FAIL_TTL
+                _AUTH_FAIL["reason"] = str(e)
+                raise
+            _AUTH_FAIL["until"] = 0.0                       # succès : on repart de zéro
         return _YAHOO_AUTH["cookie"], _YAHOO_AUTH["crumb"]
 
 
