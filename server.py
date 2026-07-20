@@ -63,28 +63,68 @@ _YAHOO_AUTH = {"cookie": None, "crumb": None}
 _YAHOO_AUTH_LOCK = threading.Lock()
 
 
-def _fetch_yahoo_auth():
-    """Récupère un cookie de session Yahoo puis un crumb valide pour ce cookie."""
-    # 1) Cookie : fc.yahoo.com renvoie souvent une erreur HTTP mais pose quand même le cookie.
-    cookie_req = urllib.request.Request("https://fc.yahoo.com", headers={"User-Agent": USER_AGENT})
-    try:
-        with urllib.request.urlopen(cookie_req, timeout=10) as resp:
-            set_cookies = resp.headers.get_all("Set-Cookie") or []
-    except urllib.error.HTTPError as e:
-        set_cookies = e.headers.get_all("Set-Cookie") or []
-    cookie_header = "; ".join(c.split(";", 1)[0] for c in set_cookies)
-    if not cookie_header:
-        raise RuntimeError("cookie Yahoo indisponible")
+# Sources de cookie, essayées dans l'ordre. fc.yahoo.com suffit depuis une IP résidentielle
+# mais reste souvent muet depuis un centre de données (cas de Render) : on retombe alors sur
+# les pages publiques, qui posent un cookie de consentement exploitable.
+_COOKIE_SOURCES = (
+    "https://fc.yahoo.com",
+    "https://finance.yahoo.com/",
+    "https://query1.finance.yahoo.com/v1/test/getcrumb",
+)
+# Le crumb peut être servi par l'un ou l'autre hôte ; ils ne sont pas bloqués de la même façon.
+_CRUMB_HOSTS = ("https://query1.finance.yahoo.com", "https://query2.finance.yahoo.com")
 
-    # 2) Crumb lié à ce cookie.
-    crumb_req = urllib.request.Request(
-        "https://query1.finance.yahoo.com/v1/test/getcrumb",
-        headers={"User-Agent": USER_AGENT, "Cookie": cookie_header})
-    with urllib.request.urlopen(crumb_req, timeout=10) as resp:
-        crumb = resp.read().decode("utf-8").strip()
-    if not crumb or "<" in crumb or len(crumb) > 40:
-        raise RuntimeError("crumb Yahoo invalide")
-    return cookie_header, crumb
+# En-têtes de navigateur complets : une requête trop nue est refusée depuis un centre de données.
+_BROWSER_HEADERS = {
+    "User-Agent": USER_AGENT,
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7",
+}
+
+
+def _collect_cookie():
+    """Premier cookie Yahoo exploitable, en essayant plusieurs sources. '' si aucune ne répond."""
+    for url in _COOKIE_SOURCES:
+        req = urllib.request.Request(url, headers=_BROWSER_HEADERS)
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                set_cookies = resp.headers.get_all("Set-Cookie") or []
+        except urllib.error.HTTPError as e:      # ces hôtes posent le cookie même en 4xx
+            set_cookies = e.headers.get_all("Set-Cookie") or []
+        except Exception:
+            continue
+        header = "; ".join(c.split(";", 1)[0] for c in set_cookies)
+        if header:
+            return header
+    return ""
+
+
+def _fetch_yahoo_auth():
+    """Récupère un cookie de session Yahoo puis un crumb valide pour ce cookie.
+
+    Lève une RuntimeError dont le message nomme l'étape en échec : depuis un centre de
+    données, Yahoo bloque souvent l'une ou l'autre, et le message générique empêchait
+    tout diagnostic à distance.
+    """
+    cookie_header = _collect_cookie()
+    if not cookie_header:
+        raise RuntimeError("cookie refusé par Yahoo (aucune des sources n'a répondu)")
+
+    dernier = None
+    for host in _CRUMB_HOSTS:
+        crumb_req = urllib.request.Request(
+            host + "/v1/test/getcrumb",
+            headers={**_BROWSER_HEADERS, "Accept": "*/*", "Cookie": cookie_header})
+        try:
+            with urllib.request.urlopen(crumb_req, timeout=10) as resp:
+                crumb = resp.read().decode("utf-8").strip()
+        except Exception as e:
+            dernier = f"{host}: {type(e).__name__}"
+            continue
+        if crumb and "<" not in crumb and len(crumb) <= 40:
+            return cookie_header, crumb
+        dernier = f"{host}: crumb inexploitable ({crumb[:20]!r})"
+    raise RuntimeError(f"crumb refusé par Yahoo — {dernier}")
 
 
 def _get_yahoo_crumb(force_refresh=False):
@@ -407,9 +447,13 @@ class Handler(SimpleHTTPRequestHandler):
         for attempt in (0, 1):
             try:
                 cookie, crumb = _get_yahoo_crumb(force_refresh=(attempt == 1))
-            except Exception:
+            except Exception as e:
+                # La cause exacte est indispensable : depuis un hébergeur, Yahoo bloque
+                # tantôt le cookie tantôt le crumb, et un message générique rend le
+                # diagnostic à distance impossible.
                 return self.send_json(
-                    {"error": "network", "message": "Impossible d'authentifier auprès de Yahoo Finance."}, 502)
+                    {"error": "network",
+                     "message": f"Impossible d'authentifier auprès de Yahoo Finance ({e})."}, 502)
 
             url = FUND_URL.format(sym=urllib.parse.quote(sym), crumb=urllib.parse.quote(crumb))
             req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, "Cookie": cookie})
