@@ -2020,12 +2020,36 @@ function botApplyExitProceeds(price, qty, cfg) {
   return { filled, cashIn, net: qty > 0 ? cashIn / qty : 0 };
 }
 
+/* Compte rendu d'une évaluation, en une phrase — fonction pure.
+ * Sans cela, une évaluation qui ne fait rien (marché fermé, pas de scan, aucun
+ * candidat au niveau) est indiscernable d'un bouton cassé. */
+function botSummarizeRun(res) {
+  const actions = [];
+  if (res.achats)   actions.push(`${res.achats} achat${res.achats > 1 ? "s" : ""}`);
+  if (res.ventes)   actions.push(`${res.ventes} vente${res.ventes > 1 ? "s" : ""}`);
+  if (res.partiels) actions.push(`${res.partiels} prise${res.partiels > 1 ? "s" : ""} partielle${res.partiels > 1 ? "s" : ""}`);
+  if (actions.length) return `Évaluation terminée : ${actions.join(", ")}.`;
+
+  if (!res.marchesOuverts.length) {
+    return "Hors séance : aucun marché ouvert, le bot n'achète pas. Positions mises à jour sur les dernières clôtures.";
+  }
+  if (!res.candidats) {
+    return "Aucun titre en cache : lancez d'abord un scan du marché (onglet Marché).";
+  }
+  if (res.retenus === 0) {
+    return `Aucun titre n'atteint le score d'achat minimum (${bot.config.qualityMin}) parmi les ${res.candidats} titres scannés.`;
+  }
+  if (res.refus.length) return res.refus[0];
+  return "Évaluation terminée : rien à faire.";
+}
+
 let botRunning = false;  // garde de réentrance : un seul runBot() à la fois
 
 // Moteur : rafraîchit les positions, applique les sorties, puis achète sur les marchés ouverts.
 async function runBot() {
-  if (!bot.started || botRunning) return;
+  if (!bot.started || botRunning) return null;
   botRunning = true;
+  const bilan = { achats: 0, ventes: 0, partiels: 0, refus: [], candidats: 0, retenus: 0, marchesOuverts: [] };
   try {
     const cfg = bot.config;
     const today = new Date().toISOString().slice(0, 10);
@@ -2040,8 +2064,10 @@ async function runBot() {
     const refuser = (cause) => {
       if (refusJournalises.has(cause)) return;
       refusJournalises.add(cause);
+      bilan.refus.push(cause);
       botLog("ignoré", null, cause);
     };
+    bilan.marchesOuverts = [...openMarkets];
 
     if (openMarkets.size === 0) botLog("info", null, "Hors séance — rattrapage des clôtures seulement, aucun achat.");
 
@@ -2112,10 +2138,12 @@ async function runBot() {
           cur.scaledOut = true;
           botLog("partiel", cur.ticker, `PARTIEL ${cur.ticker} — cible ${fpct(cur.targetPct)} atteinte, `
             + `50 % vendus à ${fnum(exit.price)}, stop suiveur à ${fnum(cur.stopLevel)}.`);
+          bilan.partiels++;
           stillOpen.push(cur);
         } else {
           botLog("vente", cur.ticker, `VENTE ${cur.ticker} — ${exit.reason} à ${fnum(exit.price)}, `
             + `${fpct(pctNet)} net de frais.`);
+          bilan.ventes++;
         }
       } else {
         stillOpen.push(cur);
@@ -2133,11 +2161,19 @@ async function runBot() {
     }
     const portfolioValue = botPortfolioValue();
 
-    const candidates = Object.keys(marketCache)
-      .map(t => ({ t, e: marketCache[t] }))
-      .filter(x => x.e && x.e.ind && x.e.ind.price > 0 && !held.has(x.t) && x.e.score != null
-                   && computeGlobalScore(x.e) >= cfg.qualityMin)
+    const enCache = Object.keys(marketCache).map(t => ({ t, e: marketCache[t] }))
+      .filter(x => x.e && x.e.ind && x.e.ind.price > 0 && x.e.score != null);
+    bilan.candidats = enCache.length;
+
+    const candidates = enCache
+      .filter(x => !held.has(x.t) && computeGlobalScore(x.e) >= cfg.qualityMin)
       .sort((a, b) => computeGlobalScore(b.e) - computeGlobalScore(a.e));
+    bilan.retenus = candidates.length;
+
+    if (!bilan.candidats) botLog("info", null, "Aucun titre en cache — lancez un scan du marché pour donner des candidats au bot.");
+    else if (!bilan.retenus && openMarkets.size) {
+      botLog("info", null, `Aucun des ${bilan.candidats} titres scannés n'atteint le score d'achat minimum (${cfg.qualityMin}).`);
+    }
 
     for (const cand of candidates) {
       const market = botMarketOf(cand.t);
@@ -2174,12 +2210,14 @@ async function runBot() {
       exposureByMarket[market] = marketExp + prof.amount;
       held.add(cand.t);
       botLog("achat", cand.t, `ACHAT ${cand.t} — ${prof.why}`);
+      bilan.achats++;
     }
 
     if (bot.history.length > 200) bot.history = bot.history.slice(0, 200);
     botRecordEquity();
     saveBot();
     if (typeof renderBot === "function") renderBot();
+    return bilan;
   } finally {
     botRunning = false;
   }
@@ -2381,6 +2419,34 @@ botTest("botQualityAdjFor: correctif retrouvé par famille", () => {
   botAssertEq(botQualityAdjFor("AAPL", { vol: 55 }, learn), 10);
   botAssertEq(botQualityAdjFor("AAPL", { vol: 25 }, learn), 0, "autre bucket, pas de correctif");
   botAssertEq(botQualityAdjFor("MC.PA", { vol: 55 }, learn), 0, "autre marché, pas de correctif");
+});
+
+/* ---------- tests : compte rendu d'évaluation ---------- */
+
+botTest("botSummarizeRun: annonce les achats et les ventes", () => {
+  const m = botSummarizeRun({ achats: 2, ventes: 1, partiels: 0, refus: [], candidats: 12, marchesOuverts: ["EU"] });
+  botAssert(m.includes("2 achat"), "doit annoncer les achats");
+  botAssert(m.includes("1 vente"), "doit annoncer les ventes");
+});
+
+botTest("botSummarizeRun: explique le silence hors séance", () => {
+  const m = botSummarizeRun({ achats: 0, ventes: 0, partiels: 0, refus: [], candidats: 12, marchesOuverts: [] });
+  botAssert(/hors séance|aucun marché/i.test(m), `doit expliquer la fermeture — reçu : ${m}`);
+});
+
+botTest("botSummarizeRun: explique l'absence de scan marché", () => {
+  const m = botSummarizeRun({ achats: 0, ventes: 0, partiels: 0, refus: [], candidats: 0, marchesOuverts: ["US"] });
+  botAssert(/scan/i.test(m), `doit renvoyer vers le scan marché — reçu : ${m}`);
+});
+
+botTest("botSummarizeRun: reprend la cause de refus", () => {
+  const m = botSummarizeRun({ achats: 0, ventes: 0, partiels: 0, refus: ["Cash insuffisant pour ouvrir une nouvelle position."], candidats: 5, marchesOuverts: ["US"] });
+  botAssert(/cash insuffisant/i.test(m), `doit citer la cause — reçu : ${m}`);
+});
+
+botTest("botSummarizeRun: aucun candidat au niveau requis", () => {
+  const m = botSummarizeRun({ achats: 0, ventes: 0, partiels: 0, refus: [], candidats: 8, marchesOuverts: ["US"], retenus: 0 });
+  botAssert(/score|qualité|niveau/i.test(m), `doit expliquer le seuil de qualité — reçu : ${m}`);
 });
 
 /* ---------- tests : statistiques ---------- */
@@ -5463,7 +5529,19 @@ function renderBot() {
 
 document.getElementById("panel-bot").addEventListener("click", e => {
   if (e.target.id === "btn-bot-start") botStart();
-  else if (e.target.id === "btn-bot-run") { e.target.disabled = true; runBot().finally(() => renderBot()); }
+  else if (e.target.id === "btn-bot-run") {
+    // Une évaluation qui ne fait rien doit le dire : sans retour visible,
+    // le bouton passe pour cassé (marché fermé, pas de scan, aucun candidat au niveau).
+    e.target.disabled = true;
+    runBot()
+      .then(bilan => {
+        if (!bilan) return;
+        const agi = bilan.achats || bilan.ventes || bilan.partiels;
+        toast(botSummarizeRun(bilan), agi ? "info" : "warn");
+      })
+      .catch(() => toast("L'évaluation a échoué (réseau ?). Réessayez dans un instant.", "error"))
+      .finally(() => { e.target.disabled = false; renderBot(); });
+  }
   else if (e.target.id === "btn-bot-reset") botReset();
   else { const sell = e.target.closest(".js-bot-sell"); if (sell) botSellManual(sell.dataset.ticker); }
 });
