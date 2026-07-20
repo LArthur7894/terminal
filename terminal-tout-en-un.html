@@ -1800,7 +1800,12 @@ function botApplyTick(pos, price, dateStr) {
     return { updated: p, exit: { price, date: dateStr, reason } };
   }
   if (price >= pos.entryPrice * (1 + pos.targetPct / 100)) {
-    return { updated: p, exit: { price, date: dateStr, reason: "prise de bénéfice" } };
+    // La cible ne solde plus la position : on encaisse la moitié et on laisse
+    // courir le reste sous stop suiveur. Une seule prise partielle par position.
+    if (!pos.scaledOut) {
+      return { updated: p, exit: { price, date: dateStr, reason: "prise partielle", partial: true } };
+    }
+    return { updated: p, exit: null };
   }
   return { updated: p, exit: null };
 }
@@ -1873,10 +1878,17 @@ async function runBot() {
       }
 
       if (exit && isFinite(exit.price) && exit.price > 0) {
-        bot.cash += cur.qty * exit.price;
+        // Prise partielle : on vend la moitié, le reliquat reste ouvert sous stop suiveur.
+        const soldQty = exit.partial ? cur.qty / 2 : cur.qty;
+        bot.cash += soldQty * exit.price;
         bot.history.unshift({ ticker: cur.ticker, family: cur.family, entryDate: cur.entryDate, entryPrice: cur.entryPrice,
-          exitDate: exit.date, exitPrice: exit.price, qty: cur.qty,
-          pnl: (exit.price - cur.entryPrice) * cur.qty, pnlPct: (exit.price / cur.entryPrice - 1) * 100, reason: exit.reason });
+          exitDate: exit.date, exitPrice: exit.price, qty: soldQty,
+          pnl: (exit.price - cur.entryPrice) * soldQty, pnlPct: (exit.price / cur.entryPrice - 1) * 100, reason: exit.reason });
+        if (exit.partial) {
+          cur.qty -= soldQty;
+          cur.scaledOut = true;
+          stillOpen.push(cur);
+        }
       } else {
         stillOpen.push(cur);
       }
@@ -2020,9 +2032,23 @@ botTest("botApplyTick: chute directe → « stop-loss », pas « stop suiveur »
   botAssert(s.exit && s.exit.reason === "stop-loss", "le suiveur n'a jamais été armé");
 });
 
-botTest("botApplyTick: cible atteinte", () => {
+botTest("botApplyTick: la cible déclenche une prise partielle", () => {
   const s = botApplyTick(botMkPos({ targetPct: 20 }), 125, "d1");
-  botAssert(s.exit && s.exit.reason === "prise de bénéfice");
+  botAssert(s.exit && s.exit.reason === "prise partielle", "la cible ne solde plus la position");
+  botAssertEq(s.exit.partial, true);
+});
+
+botTest("botApplyTick: une seule prise partielle par position", () => {
+  const s = botApplyTick(botMkPos({ targetPct: 20, scaledOut: true }), 130, "d1");
+  botAssertEq(s.exit, null, "position déjà allégée : elle ne resort que sur le suiveur");
+});
+
+botTest("botApplyTick: après le partiel, le suiveur reste actif", () => {
+  // scaledOut, plus haut à 130 → suiveur à 119,6 ; une chute à 118 doit sortir
+  let s = botApplyTick(botMkPos({ targetPct: 20, scaledOut: true }), 130, "d1");
+  botAssertClose(s.updated.stopLevel, 130 * 0.92, 1e-9);
+  s = botApplyTick(s.updated, 118, "d2");
+  botAssert(s.exit && s.exit.reason === "stop suiveur", "le reliquat sort sur le suiveur");
 });
 
 botTest("botApplyTick: prix invalide ignoré", () => {
