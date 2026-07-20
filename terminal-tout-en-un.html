@@ -1554,6 +1554,151 @@ botTest("botNextOpen: strictement positif quand fermé", () => {
   botAssert(botNextOpen("US", new Date(Date.UTC(2027, 0, 9, 12, 0))) > 0); // samedi
 });
 
+/* ============================= BOT V2 — CONFIG PAR DÉFAUT ============================= */
+
+const BOT_V2_DEFAULT_CONFIG = {
+  capital: 10000,
+  qualityMin: 60, exitScore: 40,
+  stopVolFactor: 0.40, stopMin: 5, stopMax: 20,
+  rrMin: 1.5, rrMax: 3,
+  riskPerTradePct: 1.0, maxPositionPct: 15, maxMarketPct: 60,
+  feePct: 0.10, slipPct: 0.05,
+  autoLoop: true, loopMinutes: 15,
+  learnEnabled: true, learnMinTrades: 10,
+};
+
+/* ============================= BOT V2 — PROFIL PAR TITRE =============================
+ * Le bot ne se règle plus à la main : chaque titre reçoit ses propres paramètres,
+ * déduits de sa volatilité, de son score, de sa tendance et de l'apprentissage.
+ * ==================================================================================== */
+
+function botVolBucket(vol) {
+  if (vol < 20) return "faible";
+  if (vol < 40) return "moyenne";
+  return "forte";
+}
+
+function botHorizonDays(bucket) {
+  return bucket === "faible" ? 60 : bucket === "moyenne" ? 45 : 30;
+}
+
+// Profil complet d'un candidat. `entry` = objet marketCache enrichi de `ticker`.
+// `learn` = état d'apprentissage (vide → neutre). `marketExposure` = € déjà exposé sur ce marché.
+function botProfile(entry, cfg, learn, portfolioValue, cash, marketExposure = 0) {
+  const ticker = entry.ticker;
+  const ind = entry.ind || {};
+  const market = botMarketOf(ticker);
+  const vol = (ind.vol != null && isFinite(ind.vol)) ? ind.vol : 30;
+  const volBucket = botVolBucket(vol);
+  const family = `${market}:${volBucket}`;
+  const fam = (learn && learn[family]) || { stopMult: 1, rrMult: 1, qualityAdj: 0 };
+  const score = (entry.score != null) ? computeGlobalScore(entry) : cfg.qualityMin;
+
+  // Stop initial : proportionnel à la volatilité, borné, corrigé par l'apprentissage.
+  const stopPct = clamp(cfg.stopVolFactor * fam.stopMult * vol, cfg.stopMin, cfg.stopMax);
+
+  // Stop suiveur : plus serré que l'initial — une fois en gain, on protège davantage.
+  const trailPct = 0.8 * stopPct;
+
+  // Ratio gain/risque : croît avec le score, bonifié par la tendance, pénalisé en haut de range.
+  let rr = cfg.rrMin + Math.max(0, score - cfg.qualityMin) / Math.max(1, 100 - cfg.qualityMin) * (cfg.rrMax - cfg.rrMin);
+  if (ind.price > 0 && ind.sma50 > 0 && ind.sma200 > 0 && ind.price > ind.sma50 && ind.sma50 > ind.sma200) rr += 0.3;
+  if (ind.rangePos != null && ind.rangePos > 90) rr -= 0.3;
+  rr = clamp(rr * fam.rrMult, 1.2, 4);
+  const targetPct = stopPct * rr;
+
+  // Taille par le risque : chaque position risque le même montant (v1 ignorait le stop).
+  const amountRisque = (portfolioValue * (cfg.riskPerTradePct / 100)) / (stopPct / 100);
+  let amount = clamp(amountRisque * (score / 75), 0.5 * amountRisque, 1.5 * amountRisque);
+
+  // Plafonds : par position, par marché, et cash disponible.
+  const capPos = portfolioValue * (cfg.maxPositionPct / 100);
+  const margeMarche = Math.max(0, portfolioValue * (cfg.maxMarketPct / 100) - marketExposure);
+  amount = Math.min(amount, capPos, margeMarche, Math.max(0, cash));
+
+  const horizonDays = botHorizonDays(volBucket);
+  const why = `score ${Math.round(score)}, volatilité ${vol.toFixed(0)} % (famille ${family}). `
+    + `Stop ${stopPct.toFixed(1)} %, cible ${targetPct.toFixed(1)} % (RR ${rr.toFixed(1)}). `
+    + `Mise ${Math.round(amount)} € = ${cfg.riskPerTradePct} % de risque du capital.`;
+
+  return { market, volBucket, family, stopPct, trailPct, rr, targetPct, amount, horizonDays, why };
+}
+
+/* ---------- tests : profil ---------- */
+
+// Fixture minimale d'un candidat.
+function botMkEntry(ticker, over = {}) {
+  return {
+    ticker,
+    score: over.score != null ? over.score : 75,
+    ind: { price: 100, vol: 30, sma50: 95, sma200: 90, rangePos: 50, ...(over.ind || {}) },
+  };
+}
+
+botTest("botProfile: stop borné 5–20 %", () => {
+  const cfg = BOT_V2_DEFAULT_CONFIG;
+  botAssertEq(botProfile(botMkEntry("A", { ind: { vol:  5 } }), cfg, {}, 10000, 10000).stopPct,  5);
+  botAssertEq(botProfile(botMkEntry("B", { ind: { vol: 80 } }), cfg, {}, 10000, 10000).stopPct, 20);
+});
+
+botTest("botProfile: RR croît avec le score", () => {
+  const cfg = BOT_V2_DEFAULT_CONFIG;
+  const lo = botProfile(botMkEntry("A", { score: 60 }), cfg, {}, 10000, 10000);
+  const hi = botProfile(botMkEntry("B", { score: 95 }), cfg, {}, 10000, 10000);
+  botAssert(hi.rr > lo.rr, "RR devrait croître avec le score");
+});
+
+botTest("botProfile: +0,3 tendance haussière confirmée", () => {
+  const cfg = BOT_V2_DEFAULT_CONFIG;
+  const trend = botProfile(botMkEntry("A", { ind: { price: 100, sma50:  95, sma200:  90 } }), cfg, {}, 10000, 10000);
+  const flat  = botProfile(botMkEntry("B", { ind: { price: 100, sma50: 100, sma200: 100 } }), cfg, {}, 10000, 10000);
+  botAssertClose(trend.rr - flat.rr, 0.3, 1e-9, "la tendance devrait ajouter 0,3 au RR");
+});
+
+botTest("botProfile: −0,3 en haut de range", () => {
+  const cfg = BOT_V2_DEFAULT_CONFIG;
+  const top = botProfile(botMkEntry("A", { ind: { rangePos: 95 } }), cfg, {}, 10000, 10000);
+  const mid = botProfile(botMkEntry("B", { ind: { rangePos: 50 } }), cfg, {}, 10000, 10000);
+  botAssertClose(mid.rr - top.rr, 0.3, 1e-9, "le haut de range devrait retirer 0,3 au RR");
+});
+
+botTest("botProfile: risque € constant quelle que soit la volatilité", () => {
+  const cfg = { ...BOT_V2_DEFAULT_CONFIG, maxPositionPct: 100, maxMarketPct: 100 };
+  const calm = botProfile(botMkEntry("A", { ind: { vol: 15 } }), cfg, {}, 100000, 100000);
+  const wild = botProfile(botMkEntry("B", { ind: { vol: 45 } }), cfg, {}, 100000, 100000);
+  const riskCalm = calm.amount * calm.stopPct / 100;
+  const riskWild = wild.amount * wild.stopPct / 100;
+  botAssertClose(riskCalm, riskWild, riskCalm * 0.02, "le risque € doit être identique");
+});
+
+botTest("botProfile: plafond par position", () => {
+  const cfg = BOT_V2_DEFAULT_CONFIG; // maxPositionPct 15 %
+  const p = botProfile(botMkEntry("A", { score: 95, ind: { vol: 10 } }), cfg, {}, 100000, 100000);
+  botAssert(p.amount <= 100000 * 0.15 + 1e-6, "montant plafonné à 15 % du portefeuille");
+});
+
+botTest("botProfile: plafond par marché", () => {
+  const cfg = BOT_V2_DEFAULT_CONFIG; // maxMarketPct 60 % → 55 % déjà pris ⇒ reste 5 %
+  const p = botProfile(botMkEntry("AAPL"), cfg, {}, 100000, 100000, 55000);
+  botAssert(p.amount <= 5000 + 1e-6, "montant plafonné par la marge marché restante");
+});
+
+botTest("botProfile: horizon par bucket de volatilité", () => {
+  const cfg = BOT_V2_DEFAULT_CONFIG;
+  botAssertEq(botProfile(botMkEntry("A", { ind: { vol: 10 } }), cfg, {}, 1e5, 1e5).horizonDays, 60);
+  botAssertEq(botProfile(botMkEntry("B", { ind: { vol: 30 } }), cfg, {}, 1e5, 1e5).horizonDays, 45);
+  botAssertEq(botProfile(botMkEntry("C", { ind: { vol: 60 } }), cfg, {}, 1e5, 1e5).horizonDays, 30);
+});
+
+botTest("botProfile: l'apprentissage est appliqué", () => {
+  const cfg = BOT_V2_DEFAULT_CONFIG;
+  const neutral = botProfile(botMkEntry("A", { ind: { vol: 30 } }), cfg, {}, 1e5, 1e5);
+  const learn = { "US:moyenne": { stopMult: 1.3, rrMult: 0.8, qualityAdj: 0 } };
+  const learned = botProfile(botMkEntry("A", { ind: { vol: 30 } }), cfg, learn, 1e5, 1e5);
+  botAssert(learned.stopPct > neutral.stopPct, "stopMult devrait élargir le stop");
+  botAssert(learned.rr < neutral.rr, "rrMult devrait réduire le RR");
+});
+
 /* ============================= BOT (PAPER TRADING) ============================= */
 
 const BOT_DEFAULT_CONFIG = {
