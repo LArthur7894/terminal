@@ -176,6 +176,27 @@ def _crumb_keeper():
         time.sleep(120)
 
 
+def _keep_warm():
+    """Auto-ping pour empêcher Render de s'endormir (plan gratuit : arrêt après ~15 min
+    sans requête entrante). Un appel à sa propre URL publique compte comme trafic entrant :
+    le processus — donc le fil du crumb ci-dessus — reste actif en permanence, et les
+    fondamentaux redeviennent fiables même quand personne n'utilise l'app.
+
+    Ne fait rien en local : `RENDER_EXTERNAL_URL` n'est posé que par Render.
+    """
+    base = os.environ.get("RENDER_EXTERNAL_URL")
+    if not base:
+        return
+    url = base.rstrip("/") + "/api/ping"
+    while True:
+        time.sleep(600)  # 10 min, sous le seuil d'inactivité de ~15 min
+        try:
+            urllib.request.urlopen(
+                urllib.request.Request(url, headers={"User-Agent": USER_AGENT}), timeout=15).read()
+        except Exception:
+            pass
+
+
 def _get_yahoo_crumb(force_refresh=False):
     """Renvoie (cookie, crumb), en régénérant si absent ou si force_refresh."""
     with _YAHOO_AUTH_LOCK:
@@ -301,6 +322,10 @@ class Handler(SimpleHTTPRequestHandler):
             self.handle_screener(parse_qs(parsed.query))
         elif parsed.path == "/api/fundamentals":
             self.handle_fundamentals(parse_qs(parsed.query))
+        elif parsed.path == "/api/ping":
+            # Réveil : cible de l'auto-ping anti-endormissement. Indique aussi si le
+            # crumb Yahoo est prêt, pratique pour vérifier l'état depuis l'extérieur.
+            self.send_json({"ok": True, "crumb": bool(_YAHOO_AUTH["crumb"])})
         else:
             super().do_GET()
 
@@ -556,7 +581,8 @@ if __name__ == "__main__":
     print(f"│  Source de données : Yahoo Finance (gratuit)    │")
     print(f"│  Arrêt : Ctrl+C                                 │")
     print(f"└─────────────────────────────────────────────────┘")
-    # Fil de fond qui garde le crumb Yahoo vivant (voir _crumb_keeper).
+    # Fils de fond : garder le crumb Yahoo vivant, et garder le serveur éveillé sur Render.
     threading.Thread(target=_crumb_keeper, daemon=True).start()
+    threading.Thread(target=_keep_warm, daemon=True).start()
     handler = partial(Handler, directory=APP_DIR)
     ThreadingHTTPServer((HOST, PORT), handler).serve_forever()
