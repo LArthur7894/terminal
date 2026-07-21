@@ -155,6 +155,27 @@ def _fetch_yahoo_auth():
         f"cookie {session} obtenu via {source.split('//')[-1].split('/')[0]}")
 
 
+def _crumb_keeper():
+    """Fil de fond : acquiert puis conserve un crumb Yahoo, et se répare tout seul.
+
+    Depuis une IP d'hébergeur (Render), le crumb est souvent refusé à froid (429). Plutôt
+    que de dépendre d'une requête utilisateur qui tomberait par chance sur une fenêtre
+    ouverte, on réessaie ici en continu : dès que Yahoo laisse passer, le crumb est mémorisé
+    pour tout le processus et l'app fonctionne — comme avant, sans intervention.
+    """
+    while True:
+        besoin = (not _YAHOO_AUTH["crumb"]) or (time.time() < _AUTH_FAIL["until"])
+        if besoin:
+            try:
+                cookie, crumb = _fetch_yahoo_auth()
+                with _YAHOO_AUTH_LOCK:
+                    _YAHOO_AUTH["cookie"], _YAHOO_AUTH["crumb"] = cookie, crumb
+                    _AUTH_FAIL["until"] = 0.0
+            except Exception:
+                pass  # on réessaiera au prochain tour
+        time.sleep(120)
+
+
 def _get_yahoo_crumb(force_refresh=False):
     """Renvoie (cookie, crumb), en régénérant si absent ou si force_refresh."""
     with _YAHOO_AUTH_LOCK:
@@ -535,5 +556,7 @@ if __name__ == "__main__":
     print(f"│  Source de données : Yahoo Finance (gratuit)    │")
     print(f"│  Arrêt : Ctrl+C                                 │")
     print(f"└─────────────────────────────────────────────────┘")
+    # Fil de fond qui garde le crumb Yahoo vivant (voir _crumb_keeper).
+    threading.Thread(target=_crumb_keeper, daemon=True).start()
     handler = partial(Handler, directory=APP_DIR)
     ThreadingHTTPServer((HOST, PORT), handler).serve_forever()
