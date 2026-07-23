@@ -360,6 +360,18 @@ th.sortable:hover { color: var(--amber); }
 .fund-dot.bad  { background: rgba(255, 77, 77, 0.15);  color: var(--red); }
 .fund-dot.none { background: transparent; color: var(--text-dim); font-weight: 400; }
 
+/* Revue de portefeuille (onglet F2) */
+.review-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0 12px; }
+.verdict-dot { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 11px; font-weight: 700; }
+.verdict-dot.vendre  { background: rgba(255,77,77,0.15);  color: var(--red); }
+.verdict-dot.alleger { background: rgba(255,176,0,0.15);  color: var(--amber); }
+.verdict-dot.garder  { background: rgba(46,204,113,0.15); color: var(--green); }
+.verdict-conv { color: var(--text-dim); font-size: 10px; display: block; }
+.review-detail td { background: var(--bg-raised); font-size: 12px; }
+.review-detail ul { margin: 4px 0 4px 18px; }
+.review-alt { color: var(--amber); }
+.review-alert { color: var(--red); font-size: 12px; }
+
 .bot-session { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; margin-bottom: 12px;
   padding: 8px 10px; border: 1px solid var(--border); border-radius: 4px; font-size: 12px; }
 .bot-session .sess { font-family: var(--mono); }
@@ -655,7 +667,9 @@ th.sortable:hover { color: var(--amber); }
 /* ============================= RESPONSIVE ============================= */
 
 @media (max-width: 900px) {
-  .positions-layout, .scenario-layout { grid-template-columns: 1fr; }
+  /* minmax(0,…) : la colonne peut rétrécir sous le min-content (canvas du camembert),
+     sinon la grille mono-colonne déborde de l'écran sur mobile. */
+  .positions-layout, .scenario-layout { grid-template-columns: minmax(0, 1fr); }
 }
 @media (max-width: 640px) {
   .header-top { flex-direction: column; align-items: flex-start; }
@@ -894,6 +908,16 @@ th.sortable:hover { color: var(--amber); }
         </form>
       </div>
 
+      <details class="review-block bot-settings">
+        <summary>Revue du portefeuille — aide à la décision</summary>
+        <div class="review-actions">
+          <button class="btn btn-accent" id="btn-review-run">Analyser mon portefeuille</button>
+          <button class="btn btn-ghost" id="btn-review-expand" title="Charger des titres du secteur de mes positions pour enrichir les alternatives">Élargir la recherche sectorielle</button>
+        </div>
+        <div id="review-summary"></div>
+        <p class="fund-caveat" id="review-caveat">Analyse descriptive fondée sur des règles, pas un conseil en investissement. Les décisions et tout engagement réel relèvent de vous ; pour un conseil personnalisé, consultez un professionnel agréé.</p>
+      </details>
+
       <div class="positions-layout">
         <div class="table-wrap">
           <table class="data-table" id="positions-table">
@@ -906,6 +930,8 @@ th.sortable:hover { color: var(--amber); }
                 <th class="num">Valeur</th>
                 <th class="num">P&amp;L</th>
                 <th class="num">P&amp;L %</th>
+                <th>Verdict</th>
+                <th class="num">Stop</th>
                 <th class="actions-col">Actions</th>
               </tr>
             </thead>
@@ -4345,15 +4371,127 @@ function positionValueBase(pos) {
   return convertToBase(pos.qty * refPrice(pos), positionCurrency(pos));
 }
 
+let reviewData = null; // { portfolio, additions } — calculé par « Analyser mon portefeuille »
+
+// Univers de comparaison sectorielle : cache + scan marché, dédupliqués, avec .ticker.
+function reviewUniverse() {
+  const seen = new Map();
+  for (const [t, e] of Object.entries(cache))       if (e) seen.set(t, { ...e, ticker: t });
+  for (const [t, e] of Object.entries(marketCache)) if (e && !seen.has(t)) seen.set(t, { ...e, ticker: t });
+  return [...seen.values()];
+}
+
+async function runReview() {
+  const btn = document.getElementById("btn-review-run");
+  if (btn) btn.disabled = true;
+  let done = 0;
+  for (const pos of positions) {
+    const e = cache[pos.ticker];
+    if (!e || !e.fund) {
+      try { await analyzeTicker(pos.ticker, null, { silent: true, skipRender: true }); }
+      catch (_) { /* best-effort : on affichera ce qu'on a */ }
+    }
+    done++;
+    const s = document.getElementById("review-summary");
+    if (s) s.innerHTML = `<p class="analysis-empty">Analyse en cours… ${done}/${positions.length}</p>`;
+  }
+  // Charger les taux de change avant le bilan : sinon une ligne en devise étrangère
+  // tombe à une valeur nulle et fausse silencieusement la répartition et la santé.
+  try { await ensureFxRates(); } catch (_) { /* best-effort */ }
+
+  const entryOf = (pos) => cache[pos.ticker] || null;
+  const portfolio = reviewPortfolio(positions, entryOf, positionValueBase);
+  const marketEntries = Object.entries(marketCache).map(([t, e]) => ({ ...e, ticker: t }));
+  const additions = reviewAdditions(positions, marketEntries, portfolio.bySector, portfolio.total);
+  reviewData = { portfolio, additions };
+  if (btn) btn.disabled = false;
+  renderPositions();
+}
+
+function renderReviewSummary() {
+  const el = document.getElementById("review-summary");
+  if (!el) return;
+  if (!reviewData) {
+    el.innerHTML = `<p class="analysis-empty">Cliquez « Analyser mon portefeuille » : chaque ligne reçoit un verdict, ses stops et une alternative sectorielle, plus un bilan global.</p>`;
+    return;
+  }
+  const { portfolio: p, additions } = reviewData;
+  const base = getBaseCurrency();
+  const health = p.health == null ? "—" : `${p.health}/100`;
+  const synth = p.health == null ? "Analysez vos lignes pour obtenir une synthèse."
+    : p.counts.vendre ? `${p.counts.vendre} ligne(s) à envisager de vendre, ${p.counts.alleger} à alléger.`
+    : p.counts.alleger ? `Globalement sain, ${p.counts.alleger} ligne(s) à surveiller.`
+    : "Portefeuille sain, rien d'urgent.";
+
+  const secteurs = Object.entries(p.bySector).sort((a, b) => b[1] - a[1]).map(([sec, val]) => {
+    const pct = p.total > 0 ? (val / p.total) * 100 : 0;
+    return `<div class="bot-expo-row"><span>${esc(sec)}</span>
+      <span class="bot-expo-bar"><i style="width:${Math.min(100, pct).toFixed(1)}%"></i></span>
+      <span class="num">${fnum(pct)} %</span></div>`;
+  }).join("");
+
+  const alertes = p.alerts.length ? `<ul>${p.alerts.map(a => `<li class="review-alert">⚠ ${esc(a)}</li>`).join("")}</ul>` : "";
+
+  const prio = p.priorities.filter(x => x.verdict && x.verdict !== "garder").slice(0, 6).map(x =>
+    `<li><span class="verdict-dot ${x.verdict}">${x.verdict}</span> ${esc(x.ticker)} — ${esc(x.reason)}</li>`).join("")
+    || `<li class="analysis-empty">Aucune action prioritaire.</li>`;
+
+  const add = additions.length
+    ? `<ul>${additions.map(a => `<li>${esc(a.ticker)} — ${esc(a.sector)} · score ${a.score} <button class="btn btn-small btn-ghost js-review-add" data-ticker="${esc(a.ticker)}">+ suivre</button></li>`).join("")}</ul>`
+    : `<p class="analysis-empty">Lancez/enrichissez un scan marché (F5) pour des suggestions d'ajout.</p>`;
+
+  el.innerHTML = `
+    <dl class="impact-grid">
+      <div><dt>Santé du portefeuille</dt><dd>${health}</dd></div>
+      <div><dt>À garder / alléger / vendre</dt><dd>${p.counts.garder} / ${p.counts.alleger} / ${p.counts.vendre}</dd></div>
+    </dl>
+    <p class="fund-caveat">${esc(synth)}</p>
+    <h2 class="alerts-log-title">Répartition par secteur (${esc(base)})</h2>
+    <div class="bot-expo">${secteurs || "<p class='analysis-empty'>—</p>"}</div>
+    ${alertes}
+    <h2 class="alerts-log-title">Priorités d'action</h2><ul>${prio}</ul>
+    <h2 class="alerts-log-title">À ajouter</h2>${add}`;
+}
+
+function reviewVerdictCell(pos) {
+  const e = cache[pos.ticker];
+  if (!reviewData || !e || !e.ind) return "—";
+  const v = reviewVerdict(pos, e);
+  return `<span class="verdict-dot ${v.verdict}">${v.verdict}</span><span class="verdict-conv">conviction ${esc(v.conviction)}</span>`;
+}
+function reviewStopCell(pos) {
+  const e = cache[pos.ticker];
+  if (!reviewData || !e || !e.ind) return "—";
+  return fnum(reviewStops(pos, e).initialLevel);
+}
+function reviewDetailRow(pos) {
+  const e = cache[pos.ticker];
+  if (!reviewData || !e || !e.ind) return null;
+  const v = reviewVerdict(pos, e);
+  const s = reviewStops(pos, e);
+  const alt = (v.verdict !== "garder") ? reviewSectorAlt({ ...e, ticker: pos.ticker }, reviewUniverse()) : null;
+  const effet = (pct) => pct == null ? "" : pct >= 0 ? ` (sécurise ${fpct(pct)})` : ` (limite à ${fpct(pct)})`;
+  const tr = document.createElement("tr");
+  tr.className = "review-detail";
+  tr.innerHTML = `<td colspan="10">
+    <strong>Pourquoi :</strong>
+    <ul>${v.reasons.map(r => `<li>${esc(r)}</li>`).join("")}</ul>
+    <strong>Stops :</strong> initial ${fnum(s.initialLevel)}${effet(s.initialVsPru)} · suiveur ${fnum(s.trailLevel)}${effet(s.trailVsPru)}
+    ${alt ? `<br><span class="review-alt">Alternative ${esc(alt.sector)} : ${esc(alt.ticker)} (score ${alt.scoreThem} vs ${alt.scoreYou}).</span>` : ""}
+  </td>`;
+  return tr;
+}
+
 function renderPositions() {
   const tbody = document.getElementById("positions-body");
+  renderReviewSummary();
   tbody.innerHTML = "";
 
   let totalValue = 0, totalCost = 0, degraded = false;
   const base = getBaseCurrency();
 
   if (positions.length === 0) {
-    tbody.innerHTML = `<tr><td colspan="8" class="na">Aucune position — ajoutez-en une ci-dessus.</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="10" class="na">Aucune position — ajoutez-en une ci-dessus.</td></tr>`;
   }
 
   for (const pos of positions) {
@@ -4387,6 +4525,8 @@ function renderPositions() {
       <td class="num" data-label="Valeur">${fnum(value)}</td>
       <td class="num ${pctClass(pnl)}" data-label="P&L">${fnum(pnl)}</td>
       <td class="num ${pctClass(pnlPct)}" data-label="P&L %">${fpct(pnlPct)}</td>
+      <td data-label="Verdict">${reviewVerdictCell(pos)}</td>
+      <td class="num" data-label="Stop">${reviewStopCell(pos)}</td>
       <td class="actions-col"></td>`;
 
     const actions = tr.querySelector(".actions-col");
@@ -4412,6 +4552,8 @@ function renderPositions() {
     actions.appendChild(btnDel);
 
     tbody.appendChild(tr);
+    const detail = reviewDetailRow(pos);
+    if (detail) tbody.appendChild(detail);
   }
 
   // Ligne de total — exprimée en devise de référence
@@ -4526,6 +4668,29 @@ document.getElementById("form-add-position").addEventListener("submit", e => {
   resetPositionForm();
   renderAll();
 });
+
+document.getElementById("panel-positions").addEventListener("click", e => {
+  if (e.target.id === "btn-review-run") runReview();
+  else if (e.target.id === "btn-review-expand") reviewExpandSector();
+  else { const add = e.target.closest(".js-review-add"); if (add) { addTickerToWatchlist(add.dataset.ticker); toast(`${add.dataset.ticker} ajouté à la watchlist.`, "success"); } }
+});
+
+// Enrichit à la demande quelques titres du scan partageant un secteur avec les positions,
+// pour peupler les alternatives sectorielles quand le vivier connu est trop mince.
+async function reviewExpandSector() {
+  const secteurs = new Set(positions.map(p => (cache[p.ticker] && cache[p.ticker].fund && cache[p.ticker].fund.sector)).filter(Boolean));
+  if (!secteurs.size) { toast("Analysez d'abord vos positions.", "warn"); return; }
+  const cibles = (marketCandidates || [])
+    .map(m => m.symbol).filter(sym => !cache[sym] || !marketCache[sym])
+    .slice(0, 20);
+  const btn = document.getElementById("btn-review-expand");
+  if (btn) btn.disabled = true;
+  for (const sym of cibles) {
+    try { await analyzeTicker(sym, null, { silent: true, skipRender: true, store: marketCache }); } catch (_) {}
+  }
+  if (btn) btn.disabled = false;
+  runReview();
+}
 
 // Camembert de répartition (Chart.js)
 function renderAllocationChart() {
