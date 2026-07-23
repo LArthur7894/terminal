@@ -281,7 +281,9 @@ function buildFundamentalText(fund, fundScore) {
   const f = fund, parts = [];
   if (f.trailingPE !== null) {
     const q = f.trailingPE <= 0 ? "négatif (bénéfices négatifs)" : f.trailingPE < 15 ? "bas" : f.trailingPE > 30 ? "élevé" : "modéré";
-    parts.push(`Valorisation : PER de ${fnum(f.trailingPE)} (${q})${f.forwardPE !== null ? `, PER prévisionnel ${fnum(f.forwardPE)}` : ""}${f.pegRatio !== null ? `, PEG ${fnum(f.pegRatio)}` : ""}. Note de valorisation : ${fundScore.pillars.valuation ?? "—"}/100.`);
+    const escompte = fundScore.valuationDiscounted
+      ? " (escomptée : décote peu crédible tant que la rentabilité et la santé restent faibles)" : "";
+    parts.push(`Valorisation : PER de ${fnum(f.trailingPE)} (${q})${f.forwardPE !== null ? `, PER prévisionnel ${fnum(f.forwardPE)}` : ""}${f.pegRatio !== null ? `, PEG ${fnum(f.pegRatio)}` : ""}. Note de valorisation : ${fundScore.pillars.valuation ?? "—"}/100${escompte}.`);
   }
   if (f.profitMargins !== null || f.returnOnEquity !== null) {
     parts.push(`Rentabilité : marge nette ${ffrac(f.profitMargins)}, ROE ${ffrac(f.returnOnEquity)}. Note de rentabilité : ${fundScore.pillars.profitability ?? "—"}/100.`);
@@ -312,11 +314,16 @@ function buildFundamentalText(fund, fundScore) {
     const nb = Math.round(f.numberOfAnalystOpinions);
     parts.push(`Consensus : ${nb} analystes, avis moyen ${fnum(f.recommendationMean)}/5 (1 = achat fort)`
       + `${f.targetMeanPrice != null ? `, objectif de cours moyen ${fnum(f.targetMeanPrice)}${f.currency ? " " + f.currency : ""}` : ""}. `
-      + `Opinion de marché, comptée dans la valorisation mais volontairement minoritaire.`);
+      + `Indicatif seulement : le sentiment analystes n'entre pas dans le score.`);
   } else if (f.numberOfAnalystOpinions != null && f.numberOfAnalystOpinions > 0) {
-    parts.push(`Consensus : trop peu d'analystes (${Math.round(f.numberOfAnalystOpinions)}) pour être retenu dans le score.`);
+    parts.push(`Consensus : trop peu d'analystes (${Math.round(f.numberOfAnalystOpinions)}) pour être significatif.`);
   }
-  parts.push(`Score fondamental global : ${fundScore.total}/100 → « ${fundScore.verdict} ». Agrégation pondérée des piliers disponibles (valorisation 35 %, rentabilité 30 %, croissance 20 %, santé 15 %).`);
+  const pct = (k) => Math.round(FUND_PILLAR_WEIGHTS[k] * 100);
+  const conf = fundScore.confidence != null && fundScore.confidence < 100
+    ? ` Confiance ${fundScore.confidence}/100 : données partielles, score rapproché du neutre.` : "";
+  parts.push(`Score fondamental global : ${fundScore.total}/100 → « ${fundScore.verdict} ». `
+    + `Agrégation pondérée des piliers disponibles (rentabilité ${pct("profitability")} %, `
+    + `santé ${pct("health")} %, croissance ${pct("growth")} %, valorisation ${pct("valuation")} %).${conf}`);
   return parts;
 }
 

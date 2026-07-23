@@ -8,7 +8,15 @@
 /* ============================= SCORE FONDAMENTAL ============================= */
 
 // Poids des quatre piliers du score fondamental.
-const FUND_PILLAR_WEIGHTS = { valuation: 0.35, profitability: 0.30, growth: 0.20, health: 0.15 };
+//
+// Orientation « qualité d'abord » (2026-07) : la valorisation ne pèse plus que 20 %, la
+// rentabilité et la santé montent à 60 % combinés. Raison : la valorisation (PER, FCF yield…)
+// MONTE mécaniquement quand le cours chute, dans le même sens que le score technique de
+// retour à la moyenne. Une valorisation lourde faisait donc du score fondamental un
+// amplificateur de krach au lieu d'un contrepoids. Rentabilité et santé, elles, ne
+// s'emballent pas dans une chute de cours : ce sont elles qui distinguent une vraie décote
+// d'un piège de la valeur.
+const FUND_PILLAR_WEIGHTS = { valuation: 0.20, profitability: 0.35, growth: 0.20, health: 0.25 };
 
 function clamp01(x) { return Math.max(0, Math.min(1, isFinite(x) ? x : 0.5)); }
 
@@ -108,6 +116,14 @@ function scoreTargetUpside(v) {
 
 // Barèmes (seuils absolus). Chaque métrique → sous-score 0..1.
 // Valorisation : plus c'est bas, mieux c'est (PER/PEG/PB négatifs = perte/anomalie → 0).
+//
+// Le sentiment analystes (avis moyen, objectif de cours) a été RETIRÉ de ce pilier : ce
+// n'est pas de la valorisation mais du sentiment, et surtout le « potentiel vs objectif »
+// explose quand le cours chute (le cours tombe, l'objectif suit avec retard), ce qui en
+// faisait un pur artefact de krach. Les fonctions scoreAnalystRating / targetUpsidePct
+// restent définies : l'onglet Analyse et le comparateur les affichent, mais elles ne
+// pèsent plus sur le score. `currentPrice` est conservé pour une future valorisation
+// sectorielle (comparaison au secteur plutôt qu'en absolu).
 function scoreValuation(f, currentPrice = null) {
   const pe = f.trailingPE;
   const peScore = (pe === null) ? null : (pe <= 0 ? 0 : piecewise(pe, [[8, 1], [10, 1], [25, 0.5], [50, 0]]));
@@ -121,12 +137,7 @@ function scoreValuation(f, currentPrice = null) {
   // Resserré : < 8 bien, 9–12 moyen, au-delà moins bien.
   const evScore = (ev === null) ? null : (ev <= 0 ? 0 : piecewise(ev, [[8, 1], [12, 0.5], [18, 0]]));
   const fcfScore = scoreFcfYield(fcfYield(f));
-  // Consensus : opinion de marché, retenue seulement si assez d'analystes la portent.
-  // Deux sous-scores sur huit, soit ~9 % du score total — présents sans dominer.
-  const consensus = fundHasConsensus(f);
-  const ratingScore = consensus ? scoreAnalystRating(f.recommendationMean) : null;
-  const upsideScore = consensus ? scoreTargetUpside(targetUpsidePct(f, currentPrice)) : null;
-  return avgDefined([peScore, fpeScore, pegScore, pbScore, evScore, fcfScore, ratingScore, upsideScore]);
+  return avgDefined([peScore, fpeScore, pegScore, pbScore, evScore, fcfScore]);
 }
 
 // Rentabilité : plus c'est haut, mieux c'est (marges/ROE/ROA en fraction : 0.25 = 25 %).
@@ -154,7 +165,21 @@ function scoreGrowth(f) {
   return avgDefined([rgScore, egScore, trendScore]);
 }
 
-// Santé financière + dividende. debtToEquity façon Yahoo en % (150 = 1.5x).
+// Soutenabilité du dividende : basse distribution = marge de sécurité, >90 % = fragile,
+// négative (déficit) ou >120 % (distribue plus qu'il ne gagne) = intenable. C'est un signal
+// de SOLIDITÉ, pas de rendement — contrairement au rendement, il ne s'emballe pas en krach.
+function scorePayoutRatio(v) {
+  if (v == null || !isFinite(v)) return null;
+  if (v < 0) return 0;
+  return piecewise(v, [[0.4, 1], [0.6, 0.7], [0.9, 0.2], [1.2, 0]]);
+}
+
+// Santé financière. debtToEquity façon Yahoo en % (150 = 1.5x).
+//
+// Le bonus de rendement du dividende a été RETIRÉ : un rendement élevé vient souvent d'un
+// cours qui a chuté (donc monte en krach) et annonce fréquemment une coupe — encore un
+// amplificateur de baisse. On garde du dividende ce qui mesure la solidité (le taux de
+// distribution, via scorePayoutRatio), pas ce qui mesure le cours.
 function scoreHealth(f) {
   const de = f.debtToEquity;
   const deScore = de === null ? null : (de < 0 ? 0 : piecewise(de, [[50, 1], [150, 0.5], [300, 0]]));
@@ -162,13 +187,8 @@ function scoreHealth(f) {
   const crScore = cr === null ? null : piecewise(cr, [[1, 0.2], [1.5, 0.7], [3, 1]]);
   // Levier réel : la dette nette rapportée à l'EBITDA. Négative = trésorerie excédentaire.
   const ndScore = scoreNetDebtToEbitda(netDebtToEbitda(f));
-  let base = avgDefined([deScore, crScore, ndScore]);
-  const dy = f.dividendYield; // fraction (0.03 = 3 %) ; == null couvre null ET undefined
-  if (base === null && dy != null && isFinite(dy)) base = 0.5; // dividende seul → neutre
-  if (base === null) return null;
-  // Bonus dividende : +0.1 par point de % de rendement, plafonné à +0.3.
-  const bonus = (dy == null || !isFinite(dy)) ? 0 : Math.min(0.3, Math.max(0, dy * 100 * 0.1));
-  return Math.min(1, base + bonus);
+  const payoutScore = scorePayoutRatio(f.payoutRatio);
+  return avgDefined([deScore, crScore, ndScore, payoutScore]);
 }
 
 /* ============================= FONDAMENTAUX — SELF TEST =============================
@@ -302,6 +322,56 @@ fundTest("un titre sans consensus garde un pilier Valorisation", () => {
   botAssert(sans && sans.pillars.valuation !== null, "la valorisation reste calculée sur les données comptables");
 });
 
+/* ---------- orientation qualité (2026-07) ---------- */
+
+fundTest("le sentiment analystes ne pèse plus sur la valorisation", () => {
+  // Deux titres identiques, seul l'avis analystes diffère (achat fort vs vente forte).
+  const commun = { numberOfAnalystOpinions: 30 };
+  const achat = scoreValuation(fundMk({ ...commun, recommendationMean: 1, targetMeanPrice: 1000 }), 100);
+  const vente = scoreValuation(fundMk({ ...commun, recommendationMean: 5, targetMeanPrice: 50 }), 100);
+  botAssertClose(achat, vente, 1e-9, "la valorisation ne doit dépendre que des données comptables");
+});
+
+fundTest("scorePayoutRatio: basse distribution = solide, >90 % = fragile", () => {
+  botAssertEq(scorePayoutRatio(0.4), 1);
+  botAssertClose(scorePayoutRatio(0.6), 0.7, 1e-9);
+  botAssertClose(scorePayoutRatio(0.9), 0.2, 1e-9);
+  botAssertEq(scorePayoutRatio(1.2), 0, "distribue plus qu'il ne gagne");
+  botAssertEq(scorePayoutRatio(-0.5), 0, "déficit → distribution intenable");
+  botAssertEq(scorePayoutRatio(null), null);
+});
+
+fundTest("un rendement élevé ne gonfle plus la santé (artefact de krach retiré)", () => {
+  const base = { dividendYield: 0.01, payoutRatio: 0.4 };
+  const gros = scoreHealth(fundMk({ ...base, dividendYield: 0.12 })); // rendement 12 %
+  const petit = scoreHealth(fundMk({ ...base, dividendYield: 0.01 }));
+  botAssertClose(gros, petit, 1e-9, "le rendement du dividende ne doit plus toucher la santé");
+});
+
+fundTest("piège de la valeur : une décote portée par une société fragile est escomptée", () => {
+  // Très bon marché dans les deux cas ; seule la qualité (rentabilité + santé) change.
+  const bonMarche = { trailingPE: 6, forwardPE: 6, pegRatio: 0.8, priceToBook: 0.8,
+                      enterpriseToEbitda: 5, freeCashflow: 120, marketCap: 1000 };
+  const sain = computeFundScore(fundMk({ ...bonMarche }));
+  const fragile = computeFundScore(fundMk({ ...bonMarche,
+    profitMargins: -0.10, operatingMargins: -0.05, returnOnEquity: -0.15, returnOnAssets: -0.08,
+    debtToEquity: 320, currentRatio: 0.6, totalDebt: 900, totalCash: 10, ebitda: 50, payoutRatio: 1.3 }));
+  botAssert(sain.pillars.valuation > fragile.pillars.valuation,
+    "la même décote doit valoir moins pour la société fragile");
+  botAssert(fragile.valuationDiscounted, "l'escompte doit être signalé");
+  botAssert(sain.total > fragile.total, "le titre sain doit primer sur le piège de la valeur");
+});
+
+fundTest("confiance : peu de données → score ramené vers le neutre", () => {
+  // Un seul pilier calculable (valorisation excellente) ne doit pas produire un score extrême.
+  const maigre = computeFundScore({ trailingPE: 8, forwardPE: 8, pegRatio: 1, priceToBook: 1,
+    enterpriseToEbitda: 7, freeCashflow: 80, marketCap: 1000 });
+  botAssert(maigre.confidence < 100, "couverture partielle → confiance < 100");
+  botAssert(maigre.total < 90, "un score bâti sur un seul pilier est tiré vers le neutre");
+  const complet = computeFundScore(fundMk());
+  botAssertEq(complet.confidence, 100, "tous les piliers présents → pleine confiance");
+});
+
 /* ---------- non-régression ---------- */
 
 fundTest("un fund sans les nouveaux champs produit toujours un score", () => {
@@ -336,16 +406,36 @@ function computeFundScore(fund, currentPrice = null) {
     growth: scoreGrowth(fund),
     health: scoreHealth(fund),
   };
+
+  // « Le bon marché ne compte que si l'entreprise est saine. » On escompte la valorisation
+  // quand la qualité (rentabilité + santé) est faible : une décote portée par une société
+  // qui se dégrade est un piège de la valeur, pas une occasion. Qualité neutre ou inconnue
+  // (≥ 0,5) → aucun escompte ; qualité nulle → valorisation divisée par deux.
+  const quality = avgDefined([pillars.profitability, pillars.health]);
+  let valuationDiscounted = false;
+  if (pillars.valuation !== null && quality !== null) {
+    const gate = clamp01(0.5 + quality);
+    if (gate < 0.999) { pillars.valuation *= gate; valuationDiscounted = true; }
+  }
+
   let wsum = 0, acc = 0;
   for (const k of Object.keys(FUND_PILLAR_WEIGHTS)) {
     if (pillars[k] !== null) { acc += pillars[k] * FUND_PILLAR_WEIGHTS[k]; wsum += FUND_PILLAR_WEIGHTS[k]; }
   }
   if (wsum === 0) return null; // aucun pilier calculable
-  const total = Math.round(Math.min(100, Math.max(0, (acc / wsum) * 100)));
+
+  // Confiance = couverture (pondérée) des piliers. Peu de données → score ramené vers le
+  // neutre (50), pour qu'un titre noté sur une seule métrique ne produise pas un score
+  // extrême sur lequel le bot irait miser. Couverture complète → aucun amortissement.
+  const confidence = 0.5 + 0.5 * wsum;
+  const brut = (acc / wsum) * 100;
+  const total = Math.round(Math.min(100, Math.max(0, 50 + (brut - 50) * confidence)));
+
   // Piliers exposés en /100 pour l'affichage (null conservé si indisponible).
   const pillars100 = {};
   for (const k of Object.keys(pillars)) pillars100[k] = pillars[k] === null ? null : Math.round(pillars[k] * 100);
-  return { total, pillars: pillars100, verdict: fundVerdict(total) };
+  return { total, pillars: pillars100, verdict: fundVerdict(total),
+           confidence: Math.round(confidence * 100), valuationDiscounted };
 }
 
 // Score global : mélange technique (entry.score) et fondamental selon weightTech.
