@@ -2,7 +2,7 @@
   "name": "Terminal Boursier",
   "short_name": "Terminal",
   "description": "Terminal boursier personnel : analyse technique et fondamentale, watchlist, scan de marché et alertes.",
-  "start_url": "/terminal-tout-en-un.html",
+  "start_url": "/",
   "scope": "/",
   "display": "standalone",
   "orientation": "any",

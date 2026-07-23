@@ -1,0 +1,466 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>TERMINAL — Suivi boursier personnel</title>
+
+  <!-- PWA : installable + hors-ligne (best-effort, n'affecte pas l'app si non supporté) -->
+  <link rel="manifest" href="/manifest.webmanifest">
+  <meta name="theme-color" content="#ffb000">
+  <link rel="icon" href="/icon.svg" type="image/svg+xml">
+  <script>
+    if ("serviceWorker" in navigator) {
+      window.addEventListener("load", () => navigator.serviceWorker.register("/sw.js").catch(() => {}));
+    }
+  </script>
+
+  <!-- Police monospace IBM Plex Mono (chiffres et données) + IBM Plex Sans (textes) -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+
+  <!-- Chart.js pour le camembert de répartition (onglet Positions) -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+
+  <link rel="stylesheet" href="/app/style.css">
+</head>
+<body>
+
+  <!-- ======================= HEADER ======================= -->
+  <header class="terminal-header">
+    <div class="header-top">
+      <div class="brand">
+        <span class="brand-mark">▮▮</span>
+        <span class="brand-name">TERMINAL</span>
+        <span class="brand-sub">US · EU EQUITIES</span>
+      </div>
+
+      <div class="header-right">
+        <button class="btn btn-ghost" id="btn-profile" title="Changer de profil">👤 <span id="profile-name-label"></span></button>
+        <button class="btn btn-ghost" id="btn-export" title="Exporter mes données">⬇ Export</button>
+        <button class="btn btn-ghost" id="btn-import" title="Importer des données">⬆ Import</button>
+        <input type="file" id="import-file" accept="application/json" hidden>
+      </div>
+    </div>
+
+    <!-- Bandeau défilant façon Bloomberg -->
+    <div class="ticker-tape" id="ticker-tape" aria-hidden="true">
+      <div class="tape-track" id="tape-track">
+        <span class="tape-empty">— Ajoutez des tickers à la watchlist puis lancez une analyse pour alimenter le bandeau —</span>
+      </div>
+    </div>
+
+    <!-- Navigation par onglets -->
+    <nav class="tabs" role="tablist" aria-label="Sections du terminal">
+      <button class="tab active" role="tab" aria-selected="true"  aria-controls="panel-dashboard" id="tab-dashboard" data-tab="dashboard">F1 · DASHBOARD</button>
+      <button class="tab" role="tab" aria-selected="false" aria-controls="panel-positions" id="tab-positions" data-tab="positions">F2 · POSITIONS</button>
+      <button class="tab" role="tab" aria-selected="false" aria-controls="panel-buysim" id="tab-buysim" data-tab="buysim">F3 · SIMULATEUR</button>
+      <button class="tab" role="tab" aria-selected="false" aria-controls="panel-analyse"   id="tab-analyse"   data-tab="analyse">F4 · ANALYSE</button>
+      <button class="tab" role="tab" aria-selected="false" aria-controls="panel-marche" id="tab-marche" data-tab="marche">F5 · MARCHÉ</button>
+      <button class="tab" role="tab" aria-selected="false" aria-controls="panel-allocation" id="tab-allocation" data-tab="allocation">F6 · ALLOCATION</button>
+      <button class="tab" role="tab" aria-selected="false" aria-controls="panel-alerts" id="tab-alerts" data-tab="alerts">F7 · ALERTES</button>
+      <button class="tab" role="tab" aria-selected="false" aria-controls="panel-bot" id="tab-bot" data-tab="bot">F8 · BOT</button>
+      <button class="tab" role="tab" aria-selected="false" aria-controls="panel-compare" id="tab-compare" data-tab="compare">F9 · COMPARER</button>
+      <button class="tab" role="tab" aria-selected="false" aria-controls="panel-monde" id="tab-monde" data-tab="monde">F10 · MONDE</button>
+    </nav>
+  </header>
+
+  <!-- Zone de messages (erreurs, confirmations) -->
+  <div class="toast-zone" id="toast-zone" aria-live="polite"></div>
+
+  <main>
+
+    <!-- ======================= ONGLET 1 : DASHBOARD ======================= -->
+    <section class="panel active" id="panel-dashboard" role="tabpanel" aria-labelledby="tab-dashboard">
+      <div class="panel-head">
+        <h1>Opportunités <span class="muted">/ watchlist (illimitée)</span></h1>
+        <form class="inline-form" id="form-add-ticker">
+          <div class="autocomplete-wrap">
+            <label class="sr-only" for="input-ticker">Rechercher une entreprise ou un ticker à ajouter</label>
+            <input type="text" id="input-ticker" placeholder="Ex. Apple, LVMH, AAPL, MC.PA…" maxlength="60" autocomplete="off" role="combobox" aria-expanded="false" aria-controls="ticker-suggestions" aria-autocomplete="list">
+            <ul class="suggestions-dropdown hidden" id="ticker-suggestions" role="listbox"></ul>
+          </div>
+          <button type="submit" class="btn btn-accent">+ Ajouter</button>
+        </form>
+      </div>
+
+      <div class="weight-control">
+        <label>Pondération du score global :
+          <strong class="js-weight-label">50 % technique / 50 % fondamental</strong>
+        </label>
+        <input type="range" class="js-weight-slider" min="0" max="100" step="5" value="50" aria-label="Pondération technique / fondamental">
+        <span class="weight-ends"><span>100 % fonda</span><span>100 % tech</span></span>
+      </div>
+
+      <div class="autopick-card" id="autopick-card">
+        <div class="autopick-head">
+          <h2>Meilleures opportunités <span class="muted">— sélection auto, rafraîchie toutes les heures</span></h2>
+          <span class="autopick-meta" id="autopick-meta">—</span>
+        </div>
+        <div id="autopick-body" class="autopick-body"></div>
+      </div>
+
+      <div class="watchlist-filter-row">
+        <label class="sr-only" for="watchlist-filter">Filtrer la watchlist</label>
+        <input type="text" id="watchlist-filter" placeholder="🔎 Filtrer par ticker ou nom d'entreprise…" autocomplete="off">
+      </div>
+      <div class="filter-panel" data-scope="wl">
+        <span class="filter-label">Filtres :</span>
+        <label>Global ≥ <input type="number" class="js-filter" data-scope="wl" data-key="globalMin" min="0" max="100" step="1"></label>
+        <label>Fonda ≥ <input type="number" class="js-filter" data-scope="wl" data-key="fondaMin" min="0" max="100" step="1"></label>
+        <label>PER ≤ <input type="number" class="js-filter" data-scope="wl" data-key="perMax" min="0" step="0.5"></label>
+        <label>Div. ≥ <input type="number" class="js-filter" data-scope="wl" data-key="divMin" min="0" step="0.1"> %</label>
+        <button type="button" class="btn btn-small btn-ghost js-filter-reset" data-scope="wl">Réinitialiser</button>
+      </div>
+
+      <div class="table-wrap">
+        <table class="data-table" id="watchlist-table">
+          <thead>
+            <tr>
+              <th>Ticker</th>
+              <th class="num" data-sort="price">Cours</th>
+              <th class="num" data-sort="change">Var. %</th>
+              <th class="num" data-sort="rsi">RSI 14</th>
+              <th class="num">SMA 50</th>
+              <th class="num">SMA 200</th>
+              <th>Range 52 sem.</th>
+              <th class="num" data-sort="score">Score</th>
+              <th class="num" data-sort="fonda">Fonda</th>
+              <th class="num" data-sort="global">Global</th>
+              <th>Signal</th>
+              <th>MàJ</th>
+              <th class="actions-col">Actions</th>
+            </tr>
+          </thead>
+          <tbody id="watchlist-body">
+            <!-- Rempli par app.js -->
+          </tbody>
+        </table>
+      </div>
+
+      <p class="hint">
+        Chaque clic sur <strong>Analyser</strong> déclenche <strong>1 requête</strong> vers Yahoo Finance (gratuit, sans quota, via server.py).
+        Tous les indicateurs — RSI, SMA 50/200, range 52 semaines, score — sont ensuite calculés localement, sans autre appel.
+        Les données déjà récupérées restent affichées depuis le cache.
+      </p>
+    </section>
+
+    <!-- ======================= ONGLET 2 : POSITIONS ======================= -->
+    <section class="panel" id="panel-positions" role="tabpanel" aria-labelledby="tab-positions" hidden>
+      <div class="panel-head">
+        <h1>Mes positions</h1>
+        <label class="base-cur-label" for="base-currency">Devise de réf.
+          <select id="base-currency" class="base-cur-select" aria-label="Devise de référence du portefeuille">
+            <option value="EUR">EUR €</option>
+            <option value="USD">USD $</option>
+            <option value="GBP">GBP £</option>
+            <option value="CHF">CHF</option>
+            <option value="CAD">CAD $</option>
+            <option value="JPY">JPY ¥</option>
+            <option value="AUD">AUD $</option>
+          </select>
+        </label>
+        <form class="inline-form" id="form-add-position">
+          <div class="autocomplete-wrap">
+            <label class="sr-only" for="pos-ticker">Entreprise ou ticker</label>
+            <input type="text" id="pos-ticker" placeholder="Entreprise ou ticker" maxlength="60" required autocomplete="off" role="combobox" aria-expanded="false" aria-controls="pos-ticker-suggestions" aria-autocomplete="list">
+            <ul class="suggestions-dropdown hidden" id="pos-ticker-suggestions" role="listbox"></ul>
+          </div>
+          <label class="sr-only" for="pos-qty">Quantité</label>
+          <input type="number" id="pos-qty" placeholder="Qté" min="0" step="any" required>
+          <label class="sr-only" for="pos-pru">PRU</label>
+          <input type="number" id="pos-pru" placeholder="PRU" min="0" step="any" required>
+          <button type="submit" class="btn btn-accent" id="btn-position-submit">+ Ajouter</button>
+          <button type="button" class="btn btn-ghost hidden" id="btn-position-cancel">Annuler</button>
+        </form>
+      </div>
+
+      <details class="review-block bot-settings">
+        <summary>Revue du portefeuille — aide à la décision</summary>
+        <div class="review-actions">
+          <button class="btn btn-accent" id="btn-review-run">Analyser mon portefeuille</button>
+          <button class="btn btn-ghost" id="btn-review-expand" title="Charger des titres du secteur de mes positions pour enrichir les alternatives">Élargir la recherche sectorielle</button>
+        </div>
+        <div id="review-summary"></div>
+        <p class="fund-caveat" id="review-caveat">Analyse descriptive fondée sur des règles, pas un conseil en investissement. Les décisions et tout engagement réel relèvent de vous ; pour un conseil personnalisé, consultez un professionnel agréé.</p>
+      </details>
+
+      <div class="positions-layout">
+        <div class="table-wrap">
+          <table class="data-table" id="positions-table">
+            <thead>
+              <tr>
+                <th>Ticker</th>
+                <th class="num">Qté</th>
+                <th class="num">PRU</th>
+                <th class="num">Cours</th>
+                <th class="num">Valeur</th>
+                <th class="num">P&amp;L</th>
+                <th class="num">P&amp;L %</th>
+                <th>Verdict</th>
+                <th class="num">Stop</th>
+                <th class="actions-col">Actions</th>
+              </tr>
+            </thead>
+            <tbody id="positions-body"></tbody>
+            <tfoot>
+              <tr class="total-row" id="positions-total-row">
+                <td>TOTAL</td>
+                <td></td><td></td><td></td>
+                <td class="num" id="total-value">—</td>
+                <td class="num" id="total-pnl">—</td>
+                <td class="num" id="total-pnl-pct">—</td>
+                <td></td>
+              </tr>
+            </tfoot>
+          </table>
+        </div>
+
+        <div class="chart-card">
+          <h2>Répartition du portefeuille</h2>
+          <div class="chart-holder">
+            <canvas id="allocation-chart" aria-label="Camembert de répartition du portefeuille par ligne" role="img"></canvas>
+          </div>
+          <p class="hint" id="chart-hint">Le cours utilisé est le dernier cours en cache (onglet Dashboard → Analyser). À défaut, le PRU est utilisé.</p>
+        </div>
+      </div>
+
+      <div class="chart-card">
+        <div class="perf-head">
+          <h2>Évolution du portefeuille</h2>
+          <button class="btn btn-small btn-ghost" id="btn-perf-clear">Effacer l'historique</button>
+        </div>
+        <div id="perf-stats" class="impact-grid"></div>
+        <div class="chart-holder"><canvas id="perf-canvas"></canvas></div>
+        <p class="hint">Un point est enregistré par jour d'ouverture de l'app, tant que vous avez au moins une position.</p>
+      </div>
+    </section>
+
+    <!-- ======================= ONGLET 3 : SIMULATEUR D'ACHAT ======================= -->
+    <section class="panel" id="panel-buysim" role="tabpanel" aria-labelledby="tab-buysim" hidden>
+      <div class="panel-head">
+        <h1>Simulateur d'achat <span class="muted">/ visualisez l'impact d'un futur achat avant de passer l'ordre</span></h1>
+      </div>
+
+      <div class="scenario-layout">
+        <div class="slider-card">
+          <form id="form-buysim" class="buysim-form">
+            <div class="autocomplete-wrap">
+              <label for="buysim-ticker">Ticker (position existante ou nouvelle)</label>
+              <input type="text" id="buysim-ticker" placeholder="Ex. Apple, MC.PA, AAPL…" maxlength="60" autocomplete="off" required role="combobox" aria-expanded="false" aria-controls="buysim-suggestions" aria-autocomplete="list">
+              <ul class="suggestions-dropdown hidden" id="buysim-suggestions" role="listbox"></ul>
+            </div>
+            <label for="buysim-amount">Montant à investir</label>
+            <input type="number" id="buysim-amount" min="1" step="any" placeholder="Ex. 2000">
+            <button type="submit" class="btn btn-accent">Simuler l'achat</button>
+          </form>
+          <p class="hint">Le prix utilisé est le dernier cours en cache. S'il manque, une analyse est déclenchée automatiquement (1 requête).</p>
+        </div>
+
+        <div class="scenario-result" id="buysim-result">
+          <p class="analysis-empty">Choisissez un ticker et un montant pour voir l'impact simulé sur votre portefeuille.</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- ======================= ONGLET 4 : ANALYSE ======================= -->
+    <section class="panel" id="panel-analyse" role="tabpanel" aria-labelledby="tab-analyse" hidden>
+      <div class="panel-head">
+        <h1>Synthèse par ticker</h1>
+        <button class="btn btn-ghost" id="btn-refresh-analysis">↻ Régénérer depuis le cache</button>
+      </div>
+      <div class="weight-control">
+        <label>Pondération du score global :
+          <strong class="js-weight-label">50 % technique / 50 % fondamental</strong>
+        </label>
+        <input type="range" class="js-weight-slider" min="0" max="100" step="5" value="50" aria-label="Pondération technique / fondamental">
+        <span class="weight-ends"><span>100 % fonda</span><span>100 % tech</span></span>
+      </div>
+      <div id="analysis-container" class="analysis-container"></div>
+    </section>
+
+    <!-- ======================= ONGLET 5 : MARCHÉ ======================= -->
+    <section class="panel" id="panel-marche" role="tabpanel" aria-labelledby="tab-marche" hidden>
+      <div class="panel-head">
+        <h1>Meilleures actions du marché <span class="muted">/ grandes capitalisations mondiales, classées par score technique</span></h1>
+        <span class="market-actions">
+          <button class="btn btn-accent" id="btn-market-scan">Scanner le marché</button>
+          <button class="btn btn-ghost" id="btn-market-enrich">★ Enrichir le top (fondamental)</button>
+        </span>
+      </div>
+      <p class="hint" id="market-status">Aucun scan encore lancé.</p>
+      <div class="weight-control">
+        <label>Pondération du score global :
+          <strong class="js-weight-label">50 % technique / 50 % fondamental</strong>
+        </label>
+        <input type="range" class="js-weight-slider" min="0" max="100" step="5" value="50" aria-label="Pondération technique / fondamental">
+        <span class="weight-ends"><span>100 % fonda</span><span>100 % tech</span></span>
+      </div>
+      <div class="filter-panel" data-scope="mk">
+        <span class="filter-label">Filtres :</span>
+        <label>Global ≥ <input type="number" class="js-filter" data-scope="mk" data-key="globalMin" min="0" max="100" step="1"></label>
+        <label>Fonda ≥ <input type="number" class="js-filter" data-scope="mk" data-key="fondaMin" min="0" max="100" step="1"></label>
+        <label>PER ≤ <input type="number" class="js-filter" data-scope="mk" data-key="perMax" min="0" step="0.5"></label>
+        <label>Div. ≥ <input type="number" class="js-filter" data-scope="mk" data-key="divMin" min="0" step="0.1"> %</label>
+        <button type="button" class="btn btn-small btn-ghost js-filter-reset" data-scope="mk">Réinitialiser</button>
+      </div>
+      <div class="table-wrap">
+        <table class="data-table" id="market-table">
+          <thead>
+            <tr>
+              <th>Rang</th>
+              <th>Ticker</th>
+              <th>Entreprise</th>
+              <th class="num" data-sort="price">Cours</th>
+              <th class="num" data-sort="score">Score</th>
+              <th class="num" data-sort="fonda">Fonda</th>
+              <th class="num" data-sort="global">Global</th>
+              <th>Signal</th>
+              <th class="num" data-sort="perf1y">Perf. 1 an</th>
+              <th class="num fund-col" data-sort="peg" title="Price/Earnings to Growth — sous 1, la croissance est payée bon marché">PEG</th>
+              <th class="num fund-col" data-sort="fcf" title="Flux de trésorerie libre rapporté à la capitalisation — au-dessus de 7 %, très bien">FCF</th>
+              <th class="num fund-col" data-sort="evEbitda" title="Valeur d'entreprise / EBITDA — sous 8, bon marché">VE/EBITDA</th>
+              <th class="num fund-col" data-sort="netDebt" title="Dette nette rapportée à l'EBITDA — négative, l'entreprise a plus de cash que de dettes">Dette nette</th>
+              <th class="num fund-col" data-sort="upside" title="Écart entre l'objectif de cours moyen des analystes et le cours actuel">Potentiel</th>
+              <th class="actions-col">Actions</th>
+            </tr>
+          </thead>
+          <tbody id="market-body">
+            <tr><td colspan="15" class="na">Lancez un scan pour voir les meilleures opportunités du marché.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="hint">
+        Le scan combine une liste curatée d'environ 150 grandes capitalisations mondiales avec plusieurs listes calculées par
+        Yahoo Finance à partir de l'ensemble du marché (plus actives, plus fortes hausses/baisses, grandes capitalisations
+        sous-évaluées, valeurs technologiques en croissance…), ce qui couvre au total plusieurs milliers de valeurs distinctes
+        selon les jours — bien au-delà de ce qu'on pourrait analyser titre par titre sans se faire bloquer par Yahoo.
+        Ce n'est pas un classement exhaustif et vérifié des 3000-15 000 premières capitalisations mondiales (aucune API gratuite
+        fiable ne l'expose), mais un très large échantillon, orienté vers les valeurs qui bougent réellement.
+        Chaque scan relance 1 requête Yahoo par valeur non encore en cache récent (&lt; 24 h) ; un scan complet peut prendre
+        plusieurs minutes la première fois, puis beaucoup moins si relancé la même journée.
+      </p>
+    </section>
+
+    <!-- ======================= ONGLET 6 : ALLOCATION ======================= -->
+    <section class="panel" id="panel-allocation" role="tabpanel" aria-labelledby="tab-allocation" hidden>
+      <div class="panel-head">
+        <h1>Allocation d'un budget <span class="muted">/ répartition automatique sur vos meilleures opportunités analysées</span></h1>
+      </div>
+
+      <div class="scenario-layout">
+        <div class="slider-card">
+          <form id="form-allocation" class="buysim-form">
+            <label for="allocation-amount">Montant à investir</label>
+            <input type="number" id="allocation-amount" min="1" step="any" placeholder="Ex. 100" value="100">
+            <button type="submit" class="btn btn-accent">Répartir</button>
+          </form>
+          <p class="hint">Répartition sur vos 5 meilleures opportunités « Achat » (watchlist + scan marché confondus), pondérée par leur score technique.</p>
+        </div>
+
+        <div class="scenario-result" id="allocation-result">
+          <p class="analysis-empty">Entrez un montant et cliquez sur « Répartir » pour voir une proposition d'allocation.</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- ======================= ONGLET 7 : ALERTES ======================= -->
+    <section class="panel" id="panel-alerts" role="tabpanel" aria-labelledby="tab-alerts" hidden>
+      <div class="panel-head">
+        <h1>Alertes <span class="muted">/ prévenues à l'ouverture et à chaque analyse</span></h1>
+      </div>
+      <form id="form-alert" class="alert-form">
+        <select id="alert-ticker" aria-label="Ticker"></select>
+        <select id="alert-type" aria-label="Type d'alerte">
+          <option value="price">Prix</option>
+          <option value="global">Score global</option>
+          <option value="rsi">RSI</option>
+          <option value="change">Variation du jour</option>
+        </select>
+        <select id="alert-direction" aria-label="Condition"></select>
+        <input type="number" id="alert-value" step="any" placeholder="Valeur" aria-label="Valeur seuil">
+        <button type="submit" class="btn btn-accent">+ Ajouter l'alerte</button>
+      </form>
+      <p class="hint">Une alerte n'est évaluée que lorsque son titre est en cache (analysé). Pas de notification hors application.</p>
+      <div id="alerts-list" class="alerts-list"></div>
+      <h2 class="alerts-log-title">Déclenchements récents</h2>
+      <div id="alerts-log" class="alerts-log"></div>
+    </section>
+
+    <!-- ======================= ONGLET 8 : BOT ======================= -->
+    <section class="panel" id="panel-bot" role="tabpanel" aria-labelledby="tab-bot" hidden>
+      <div class="panel-head">
+        <h1>Bot <span class="muted">/ simulateur (paper trading) — argent 100 % virtuel, pas un conseil</span></h1>
+        <span class="market-actions" id="bot-actions"></span>
+      </div>
+      <div id="bot-session" class="bot-session"></div>
+      <div id="bot-summary" class="bot-summary"></div>
+      <div id="bot-positions"></div>
+
+      <details class="bot-settings" open>
+        <summary>Statistiques</summary>
+        <div id="bot-stats"></div>
+        <div class="bot-equity-holder"><canvas id="bot-equity-canvas"></canvas></div>
+      </details>
+      <details class="bot-settings">
+        <summary>Familles apprises</summary>
+        <div id="bot-learn"></div>
+      </details>
+      <details class="bot-settings">
+        <summary>Journal des décisions</summary>
+        <div id="bot-log"></div>
+      </details>
+      <details class="bot-settings">
+        <summary>Historique des trades</summary>
+        <div id="bot-history"></div>
+      </details>
+      <details class="bot-settings">
+        <summary>Réglages du bot</summary>
+        <div id="bot-config" class="filter-panel"></div>
+      </details>
+    </section>
+
+    <!-- ======================= ONGLET 9 : COMPARER ======================= -->
+    <section class="panel" id="panel-compare" role="tabpanel" aria-labelledby="tab-compare" hidden>
+      <div class="panel-head">
+        <h1>Comparer <span class="muted">/ 2 à 4 titres de la watchlist, côte à côte</span></h1>
+      </div>
+      <div id="compare-select" class="compare-select"></div>
+      <div id="compare-periods" class="chart-periods" role="tablist"></div>
+      <div class="chart-holder"><canvas id="compare-canvas"></canvas></div>
+      <div id="compare-table"></div>
+    </section>
+
+    <!-- ======================= ONGLET 10 : MONDE ======================= -->
+    <section class="panel" id="panel-monde" role="tabpanel" aria-labelledby="tab-monde" hidden>
+      <div class="panel-head">
+        <h1>Monde <span class="muted">/ macro & actualité — repères pour l'entretien</span></h1>
+      </div>
+      <div id="monde-body"></div>
+    </section>
+
+  </main>
+
+  <!-- Bandeau disclaimer permanent -->
+  <footer class="disclaimer" role="contentinfo">
+    ⚠ Analyse basée sur des indicateurs techniques automatisés, ne constitue pas un conseil en investissement réglementé.
+  </footer>
+
+  <script src="/app/01-base.js"></script>
+  <script src="/app/02-indicateurs.js"></script>
+  <script src="/app/03-fondamentaux.js"></script>
+  <script src="/app/04-etat.js"></script>
+  <script src="/app/05-bot.js"></script>
+  <script src="/app/06-revue.js"></script>
+  <script src="/app/07-donnees.js"></script>
+  <script src="/app/08-ui-dashboard.js"></script>
+  <script src="/app/09-ui-positions.js"></script>
+  <script src="/app/10-ui-analyse.js"></script>
+  <script src="/app/11-ui-marche.js"></script>
+  <script src="/app/12-ui-allocation-monde.js"></script>
+  <script src="/app/13-ui-alertes-bot.js"></script>
+  <script src="/app/14-ui-comparer.js"></script>
+  <script src="/app/99-init.js"></script>
+</body>
+</html>

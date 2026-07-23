@@ -33,9 +33,10 @@ HOST = "0.0.0.0" if "PORT" in os.environ else "127.0.0.1"
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 HISTORY_KEEP = 420  # jours de bourse renvoyés (aligné sur app.js)
 
-# Page servie à la racine. Sans elle, SimpleHTTPRequestHandler affiche le listing du
-# dossier — l'app était invisible et .git/ navigable depuis l'extérieur.
-APP_PAGE = "/terminal-tout-en-un.html"
+# Ancienne URL de l'app, du temps où tout tenait dans un seul fichier. Les marque-pages
+# et les PWA déjà installées la visent encore : on les renvoie vers la racine plutôt que
+# de leur servir un 404.
+ANCIENNE_PAGE = "/terminal-tout-en-un.html"
 
 # range=2y suffit largement pour SMA 200 + range 52 semaines
 YAHOO_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{sym}?range=2y&interval=1d"
@@ -362,12 +363,11 @@ class Handler(SimpleHTTPRequestHandler):
     def do_GET(self):
         parsed = urlparse(self.path)
 
-        # Racine → l'app. Sans cette redirection, SimpleHTTPRequestHandler affichait le
-        # listing du dossier (server.py, tests/, .git/...) au lieu du terminal.
-        if parsed.path == "/":
-            dest = APP_PAGE + (f"?{parsed.query}" if parsed.query else "")
-            self.send_response(302)
-            self.send_header("Location", dest)
+        # « / » sert index.html (comportement natif de SimpleHTTPRequestHandler). L'ancienne
+        # URL mono-fichier y est redirigée, en conservant la requête (?selftest=1).
+        if parsed.path == ANCIENNE_PAGE:
+            self.send_response(301)
+            self.send_header("Location", "/" + (f"?{parsed.query}" if parsed.query else ""))
             self.send_header("Content-Length", "0")
             self.end_headers()
             return
