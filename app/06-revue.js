@@ -378,3 +378,5 @@ reviewTest("reviewAdditions: bonus au secteur sous-exposé", () => {
   const out = reviewAdditions([], market, bySector, total);
   botAssertEq(out[0].ticker, "NEWSEC");   // 74 + 10 (sous-exposé) = 84 > 82
 });
+
+MODULES_CHARGES.push("06-revue");   // doit rester la dernière ligne du fichier

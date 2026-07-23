@@ -280,3 +280,5 @@ document.querySelectorAll(".tab").forEach(btn => {
     if (btn.dataset.tab === "monde") { renderMonde(); if (!mondeUpdated && !mondeLoading) loadMondeData(); }
   });
 });
+
+MODULES_CHARGES.push("12-ui-allocation-monde");   // doit rester la dernière ligne du fichier

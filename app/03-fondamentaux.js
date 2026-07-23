@@ -354,3 +354,5 @@ function computeGlobalScore(entry) {
   if (!entry.fundScore) return entry.score;
   return Math.round(entry.score * weightTech + entry.fundScore.total * (1 - weightTech));
 }
+
+MODULES_CHARGES.push("03-fondamentaux");   // doit rester la dernière ligne du fichier

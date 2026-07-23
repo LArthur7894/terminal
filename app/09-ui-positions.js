@@ -519,3 +519,5 @@ function applyBuysim() {
   document.getElementById("buysim-result").innerHTML =
     `<p class="analysis-empty">Achat appliqué. Lancez une nouvelle simulation si besoin.</p>`;
 }
+
+MODULES_CHARGES.push("09-ui-positions");   // doit rester la dernière ligne du fichier

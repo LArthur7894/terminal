@@ -531,3 +531,5 @@ function setWeightTech(v) {
     slider.addEventListener("input", () => setWeightTech(Number(slider.value) / 100));
   });
 })();
+
+MODULES_CHARGES.push("10-ui-analyse");   // doit rester la dernière ligne du fichier

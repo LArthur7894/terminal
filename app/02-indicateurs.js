@@ -151,3 +151,5 @@ function signalFromScore(score) {
   if (score <= 35) return "Vente";
   return "Neutre";
 }
+
+MODULES_CHARGES.push("02-indicateurs");   // doit rester la dernière ligne du fichier

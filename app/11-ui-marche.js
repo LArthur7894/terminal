@@ -343,3 +343,5 @@ function wireSortHeaders(tableId, scope, renderFn) {
   renderWatchlist();
   renderMarketTable();
 })();
+
+MODULES_CHARGES.push("11-ui-marche");   // doit rester la dernière ligne du fichier

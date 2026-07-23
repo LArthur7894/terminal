@@ -1103,3 +1103,5 @@ botTest("botAgeDays: dépassement d'horizon détecté", () => {
   const recent = new Date(Date.now() - 5 * 86400000).toISOString().slice(0, 10);
   botAssert(botAgeDays(recent) < 30, "5 jours ne dépassent aucun horizon");
 });
+
+MODULES_CHARGES.push("05-bot");   // doit rester la dernière ligne du fichier

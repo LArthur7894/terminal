@@ -4,6 +4,58 @@
    F7 · Alertes et F8 · Bot, avec la boucle intraday du bot.
    ============================================================================ */
 
+/* ATTENTION À L'ORDRE DANS CE FICHIER : la boucle du bot ci-dessous déclare
+ * `botTimer` et `botNextRunAt`, que renderBot() lit — or renderBot() est appelé au
+ * chargement, plus bas. Ces `let` doivent donc être exécutés AVANT. Les remettre
+ * après casse tout le fichier au démarrage (zone morte temporelle), et seulement
+ * pour les utilisateurs dont le bot est démarré : `bot.started && botNextRunAt`
+ * court-circuite sinon, ce qui rend la panne invisible en test. */
+
+/* ---------- boucle intraday du bot ----------
+ * Pas de serveur 24/7 : le bot ne tourne que quand l'app est ouverte. Tant qu'un
+ * marché est ouvert et que l'onglet est visible, on réévalue toutes les
+ * `loopMinutes`. Hors séance, on se replanifie à la prochaine ouverture (plafonné
+ * à 30 min pour rester simple). Onglet en arrière-plan → timer suspendu.
+ * ------------------------------------------------------------------------- */
+
+let botTimer = null;
+let botNextRunAt = null;  // Date de la prochaine évaluation, ou null si la boucle est à l'arrêt
+
+function botStopTimer() {
+  if (botTimer) { clearTimeout(botTimer); botTimer = null; }
+  botNextRunAt = null;
+}
+
+function botScheduleNext() {
+  botStopTimer();
+  if (!bot.started || !bot.config.autoLoop) return;
+  if (document.visibilityState !== "visible") return;
+
+  let delayMs;
+  if (botOpenMarkets().size > 0) {
+    delayMs = Math.max(1, bot.config.loopMinutes) * 60 * 1000;
+  } else {
+    const next = Math.min(botNextOpen("EU"), botNextOpen("US"), botNextOpen("ASIA"));
+    delayMs = Math.min(next || 30 * 60 * 1000, 30 * 60 * 1000);
+  }
+  botNextRunAt = new Date(Date.now() + delayMs);
+  botTimer = setTimeout(async () => {
+    try { await runBot(); } catch (_) { /* best-effort : on retentera au prochain tour */ }
+    botScheduleNext();
+  }, delayMs);
+}
+
+if (bot.started) {
+  setTimeout(() => runBot().catch(() => {}).finally(botScheduleNext), 1500); // laisse le cache marché se charger d'abord
+}
+
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") botScheduleNext();
+  else botStopTimer();
+});
+recordPerfSnapshot(); // point de performance du jour (si positions)
+
+
 /* ============================= ONGLET 7 : ALERTES — UI ============================= */
 
 // Options de direction + valeur par défaut selon le type choisi.
@@ -415,46 +467,4 @@ if (botEquityDetails) {
 
 renderBot();
 
-/* ---------- boucle intraday du bot ----------
- * Pas de serveur 24/7 : le bot ne tourne que quand l'app est ouverte. Tant qu'un
- * marché est ouvert et que l'onglet est visible, on réévalue toutes les
- * `loopMinutes`. Hors séance, on se replanifie à la prochaine ouverture (plafonné
- * à 30 min pour rester simple). Onglet en arrière-plan → timer suspendu.
- * ------------------------------------------------------------------------- */
-
-let botTimer = null;
-let botNextRunAt = null;  // Date de la prochaine évaluation, ou null si la boucle est à l'arrêt
-
-function botStopTimer() {
-  if (botTimer) { clearTimeout(botTimer); botTimer = null; }
-  botNextRunAt = null;
-}
-
-function botScheduleNext() {
-  botStopTimer();
-  if (!bot.started || !bot.config.autoLoop) return;
-  if (document.visibilityState !== "visible") return;
-
-  let delayMs;
-  if (botOpenMarkets().size > 0) {
-    delayMs = Math.max(1, bot.config.loopMinutes) * 60 * 1000;
-  } else {
-    const next = Math.min(botNextOpen("EU"), botNextOpen("US"), botNextOpen("ASIA"));
-    delayMs = Math.min(next || 30 * 60 * 1000, 30 * 60 * 1000);
-  }
-  botNextRunAt = new Date(Date.now() + delayMs);
-  botTimer = setTimeout(async () => {
-    try { await runBot(); } catch (_) { /* best-effort : on retentera au prochain tour */ }
-    botScheduleNext();
-  }, delayMs);
-}
-
-if (bot.started) {
-  setTimeout(() => runBot().catch(() => {}).finally(botScheduleNext), 1500); // laisse le cache marché se charger d'abord
-}
-
-document.addEventListener("visibilitychange", () => {
-  if (document.visibilityState === "visible") botScheduleNext();
-  else botStopTimer();
-});
-recordPerfSnapshot(); // point de performance du jour (si positions)
+MODULES_CHARGES.push("13-ui-alertes-bot");   // doit rester la dernière ligne du fichier

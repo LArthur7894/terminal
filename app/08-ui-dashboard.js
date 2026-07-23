@@ -341,3 +341,5 @@ function renderTape() {
   // Contenu dupliqué pour un défilement continu sans "trou"
   track.innerHTML = items.join("") + items.join("");
 }
+
+MODULES_CHARGES.push("08-ui-dashboard");   // doit rester la dernière ligne du fichier

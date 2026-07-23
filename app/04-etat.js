@@ -186,3 +186,5 @@ function checkAlerts() {
   if (changed) saveAlerts();
   if (typeof renderAlerts === "function") renderAlerts();
 }
+
+MODULES_CHARGES.push("04-etat");   // doit rester la dernière ligne du fichier

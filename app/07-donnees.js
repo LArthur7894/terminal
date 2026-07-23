@@ -328,3 +328,5 @@ attachTickerAutocomplete(
     document.getElementById("pos-qty").focus();
   }
 );
+
+MODULES_CHARGES.push("07-donnees");   // doit rester la dernière ligne du fichier

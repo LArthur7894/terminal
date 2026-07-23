@@ -5,6 +5,12 @@
    Chargé en premier — tout le reste en dépend.
    ============================================================================ */
 
+/* Registre de chargement : chaque module signe la DERNIÈRE ligne de son fichier.
+ * Un script classique qui lève une erreur s'interrompt sans bruit — les suivants se
+ * chargent quand même et l'app paraît vivante, amputée de tout ce qui suivait l'erreur.
+ * Une signature manquante en fin de chargement désigne le fichier fautif sans ambiguïté. */
+const MODULES_CHARGES = [];
+
 /* ============================= PROFILS (identification simple, sans mot de passe) =============================
    Chaque profil (un simple prénom) a ses propres données : watchlist, positions,
    cache d'analyses, etc. Techniquement, toutes les clés localStorage de l'app sont
@@ -151,3 +157,5 @@ function toast(message, kind = "info") {
   zone.appendChild(el);
   setTimeout(() => el.remove(), 7000);
 }
+
+MODULES_CHARGES.push("01-base");   // doit rester la dernière ligne du fichier

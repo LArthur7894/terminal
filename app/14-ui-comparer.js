@@ -268,3 +268,5 @@ function renderAll() {
   renderMarketResults();
   checkAlerts();
 }
+
+MODULES_CHARGES.push("14-ui-comparer");   // doit rester la dernière ligne du fichier

@@ -640,6 +640,20 @@ class Handler(SimpleHTTPRequestHandler):
             return self.send_json(
                 {"error": "format", "message": f"Réponse fondamentale Yahoo inattendue pour {sym}."}, 502)
 
+    def end_headers(self):
+        """Impose la revalidation des fichiers de l'app.
+
+        Sans en-tête de cache explicite, le navigateur applique une fraîcheur *heuristique*
+        et peut resservir un JS d'avant le déploiement — panne classique et coûteuse à
+        diagnostiquer, puisque le fichier est correct sur le disque comme sur le serveur.
+        `no-cache` n'interdit pas la mise en cache : il impose de revalider à chaque fois
+        (304 si rien n'a changé), donc le coût réseau reste minime.
+        Les réponses /api/ posent déjà leur propre Cache-Control (no-store).
+        """
+        if not self.path.startswith("/api/"):
+            self.send_header("Cache-Control", "no-cache")
+        super().end_headers()
+
     def list_directory(self, path):
         """Aucun listing de dossier, nulle part (/docs/, /tests/...). 404 à la place."""
         self.send_error(404, "Not Found")

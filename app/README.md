@@ -35,8 +35,22 @@ C'est ce qui dicte l'ordre ci-dessous ; en particulier `04-etat.js` vient après
 | `08-` à `14-ui-*.js` | Rendu et câblage, un fichier par groupe d'onglets |
 | `99-init.js` | Auto-tests et amorçage |
 
-Ajouter un fichier : lui donner un numéro cohérent avec ses dépendances et
-l'insérer **au bon rang** dans `index.html` *et* dans `SHELL` de `sw.js`.
+Ajouter un fichier : lui donner un numéro cohérent avec ses dépendances, l'insérer
+**au bon rang** dans `index.html` *et* dans `SHELL` de `sw.js`, terminer le fichier par
+`MODULES_CHARGES.push("<nom>")` et ajouter ce nom à `MODULES_ATTENDUS` (`99-init.js`).
+
+### Le filet de sécurité
+
+Chaque module signe `MODULES_CHARGES` sur sa **dernière ligne**, et `99-init.js` compare
+cette liste à `MODULES_ATTENDUS` **avant tout rendu**. Raison d'être : un script classique
+qui lève au chargement s'interrompt *sans bruit* — les fichiers suivants se chargent, l'app
+paraît vivante, et tout ce qui suivait l'erreur n'existe simplement pas.
+
+C'est arrivé pour de vrai : le bot a cessé de fonctionner après le découpage parce que
+`renderBot()` lisait `botNextRunAt` déclaré plus bas dans le même fichier. Le test
+`bot.started && botNextRunAt` court-circuitait, donc la panne était **invisible** tant que
+le bot n'était pas démarré — verte en test, cassée chez l'utilisateur. Un bandeau rouge
+nomme désormais le module fautif.
 
 ## Données
 
