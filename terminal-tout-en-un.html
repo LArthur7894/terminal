@@ -3449,6 +3449,81 @@ reviewTest("reviewStops: stop sécurisant un gain quand le cours a monté", () =
   botAssert(s.initialVsPru > 0, "stop au-dessus du PRU → sécurise un gain");
 });
 
+// Verdict d'une ligne à partir de règles lisibles. La « cassure de stop » n'existe pas pour
+// une ligne détenue (le stop est sous le cours) : on lit à la place une chute déjà subie (m1).
+function reviewVerdict(pos, entry) {
+  const ind = entry.ind || {};
+  const g = reviewGlobal(entry);
+  const price = ind.price;
+  const pnlPct = (price > 0 && pos.pru > 0) ? (price / pos.pru - 1) * 100 : null;
+  const m1 = ind.perf ? ind.perf.m1 : null;
+
+  const sell = [], trim = [];
+  if (g != null && g <= 35) sell.push(`score global effondré (${g}/100)`);
+  if (entry.signal === "Vente") sell.push("signal technique à la vente");
+  if (g != null && g < 50 && m1 != null && m1 < -10) sell.push(`score faible et forte baisse récente (${fpct(m1)})`);
+
+  if (ind.rangePos != null && ind.rangePos > 90) trim.push("au sommet de son range 52 semaines");
+  if (ind.rsi != null && ind.rsi > 70) trim.push(`suracheté (RSI ${Math.round(ind.rsi)})`);
+  if (pnlPct != null && pnlPct > 40 && g != null && g < 60) trim.push(`forte plus-value (${fpct(pnlPct)}) sur un titre qui faiblit — sécuriser`);
+  if (g != null && g >= 35 && g < 50) trim.push(`signaux mitigés (${g}/100)`);
+
+  let verdict, reasons;
+  if (sell.length)      { verdict = "vendre";  reasons = sell; }
+  else if (trim.length) { verdict = "alleger"; reasons = trim; }
+  else {
+    verdict = "garder";
+    reasons = [(g != null && g >= 60) ? `fondamentaux/technique solides (${g}/100)` : `rien d'alarmant (${g == null ? "non analysé" : g + "/100"})`];
+  }
+
+  let conviction;
+  if ((g != null && (g <= 25 || g >= 75)) || reasons.length >= 2) conviction = "forte";
+  else if (g != null && g >= 45 && g <= 55) conviction = "faible";
+  else conviction = "moyenne";
+
+  return { verdict, conviction, reasons };
+}
+
+/* ---------- tests : verdict ---------- */
+
+reviewTest("reviewVerdict: score ≤ 35 → vendre", () => {
+  const v = reviewVerdict(reviewMkPos(), reviewMkEntry({ score: 20 }));
+  botAssertEq(v.verdict, "vendre");
+  botAssertEq(v.conviction, "forte");        // g ≤ 25
+  botAssert(v.reasons.length >= 1);
+});
+
+reviewTest("reviewVerdict: signal Vente → vendre", () => {
+  botAssertEq(reviewVerdict(reviewMkPos(), reviewMkEntry({ score: 55, signal: "Vente" })).verdict, "vendre");
+});
+
+reviewTest("reviewVerdict: haut de range → alléger", () => {
+  botAssertEq(reviewVerdict(reviewMkPos(), reviewMkEntry({ score: 60, ind: { price: 100, rangePos: 95 } })).verdict, "alleger");
+});
+
+reviewTest("reviewVerdict: forte plus-value + score faible → alléger", () => {
+  // cours 100, PRU 60 → +67 % ; score 55 < 60
+  botAssertEq(reviewVerdict(reviewMkPos({ pru: 60 }), reviewMkEntry({ score: 55, ind: { price: 100 } })).verdict, "alleger");
+});
+
+reviewTest("reviewVerdict: score ≥ 60 solide → garder", () => {
+  const v = reviewVerdict(reviewMkPos(), reviewMkEntry({ score: 72 }));
+  botAssertEq(v.verdict, "garder");
+});
+
+// Score 50 : la règle « signaux mitigés » couvre 35 ≤ g < 50, donc 50 n'y tombe pas → aucune
+// raison sell/trim → « garder », conviction faible (45 ≤ 50 ≤ 55).
+reviewTest("reviewVerdict: zone grise (50) → garder, conviction faible", () => {
+  const v = reviewVerdict(reviewMkPos(), reviewMkEntry({ score: 50, ind: { price: 100, rangePos: 50, rsi: 50 } }));
+  botAssertEq(v.verdict, "garder");
+  botAssertEq(v.conviction, "faible");
+});
+
+reviewTest("reviewVerdict: non analysé → garder sans crash", () => {
+  const v = reviewVerdict(reviewMkPos(), reviewMkEntry({ score: null }));
+  botAssert(v.verdict === "garder" && v.reasons.length === 1);
+});
+
 /* ============================= FETCH FONDAMENTAUX ============================= */
 
 async function fetchFundamentals(ticker) {
