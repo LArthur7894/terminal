@@ -43,6 +43,10 @@ class TestNormalizeFundamentals(unittest.TestCase):
                 "recommendationKey": "buy",
                 "targetMeanPrice": {"raw": 250.0, "fmt": "250.00"},
             },
+            "assetProfile": {
+                "sector": "Technology",
+                "industry": "Consumer Electronics",
+            },
         }
 
     def test_extracts_all_fields(self):
@@ -59,6 +63,18 @@ class TestNormalizeFundamentals(unittest.TestCase):
         self.assertEqual(out["debtToEquity"], 150.0)
         self.assertEqual(out["dividendYield"], 0.005)
         self.assertEqual(out["recommendationKey"], "buy")
+
+    def test_extracts_sector(self):
+        out = server._normalize_fundamentals("AAPL", self._sample_node())
+        self.assertEqual(out["sector"], "Technology")
+        self.assertEqual(out["industry"], "Consumer Electronics")
+
+    def test_sector_absent_returns_none(self):
+        node = self._sample_node()
+        del node["assetProfile"]
+        out = server._normalize_fundamentals("AAPL", node)
+        self.assertIsNone(out["sector"])
+        self.assertIsNone(out["industry"])
 
     def test_missing_fields_become_none(self):
         node = {"price": {"currency": "EUR"}}  # tout le reste absent

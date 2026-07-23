@@ -54,7 +54,7 @@ USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
 # à cette URL ne coûte pas de requête supplémentaire : c'est le même appel quoteSummary.
 # balanceSheetHistory est volontairement absent : Yahoo n'y renvoie plus que des dates.
 FUND_URL = ("https://query1.finance.yahoo.com/v10/finance/quoteSummary/{sym}"
-            "?modules=summaryDetail,financialData,defaultKeyStatistics,price,incomeStatementHistory"
+            "?modules=summaryDetail,financialData,defaultKeyStatistics,price,incomeStatementHistory,assetProfile"
             "&crumb={crumb}")
 
 # Cookie + crumb Yahoo, partagés entre requêtes (ThreadingHTTPServer → protégés par un verrou).
@@ -235,6 +235,7 @@ def _normalize_fundamentals(sym, node):
     stats = node.get("defaultKeyStatistics") or {}
     fin = node.get("financialData") or {}
     price = node.get("price") or {}
+    profile = node.get("assetProfile") or {}
 
     rec = fin.get("recommendationKey")
     long_name = price.get("longName") or price.get("shortName")
@@ -275,6 +276,9 @@ def _normalize_fundamentals(sym, node):
         "totalCash": _pick(fin, "totalCash"),
         "ebitda": _pick(fin, "ebitda"),
         "sharesOutstanding": _pick(stats, "sharesOutstanding"),
+        # Secteur / industrie (assetProfile) — pour la revue de portefeuille (comparaison sectorielle).
+        "sector": profile.get("sector") if isinstance(profile.get("sector"), str) else None,
+        "industry": profile.get("industry") if isinstance(profile.get("industry"), str) else None,
         # Résultat net par exercice, du plus ancien au plus récent (régularité du BNA).
         "netIncomeHistory": _net_income_history(node),
     }
