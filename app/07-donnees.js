@@ -85,7 +85,7 @@ async function ensureFxRates() {
  * Renvoie { dates, closes, currency } du plus récent au plus ancien.
  * Lève une erreur typée { type, message }.
  */
-async function fetchDailySeries(ticker) {
+async function fetchDailySeries(ticker, { fresh = false } = {}) {
   if (location.protocol === "file:") {
     throw {
       type: "noserver",
@@ -98,7 +98,10 @@ async function fetchDailySeries(ticker) {
 
   let resp;
   try {
-    resp = await fetch("/api/history?symbol=" + encodeURIComponent(ticker), { signal: ctrl.signal });
+    // `fresh` traverse le cache de 15 min du serveur : réservé aux décisions du bot,
+    // qui doivent porter sur le cours de l'instant.
+    resp = await fetch("/api/history?symbol=" + encodeURIComponent(ticker) + (fresh ? "&fresh=1" : ""),
+                       { signal: ctrl.signal });
   } catch (e) {
     clearTimeout(timer);
     if (e.name === "AbortError") {
@@ -156,10 +159,10 @@ async function fetchFundamentals(ticker) {
  * mise en cache. Toute erreur est affichée en toast, jamais de crash silencieux.
  */
 async function analyzeTicker(ticker, button, opts = {}) {
-  const { silent = false, skipRender = false, store = cache, skipFund = false } = opts;
+  const { silent = false, skipRender = false, store = cache, skipFund = false, fresh = false } = opts;
   if (button) { button.disabled = true; button.textContent = "…"; }
   try {
-    const hist = await fetchDailySeries(ticker);
+    const hist = await fetchDailySeries(ticker, { fresh });
     const ind = computeIndicators(hist);
     const score = computeScore(ind);
 

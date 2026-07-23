@@ -505,12 +505,25 @@ function botPortfolioValue() {
 }
 
 // Vente manuelle immédiate au cours courant.
-function botSellManual(ticker) {
+async function botSellManual(ticker) {
   const idx = bot.positions.findIndex(p => p.ticker === ticker);
   if (idx < 0) return;
   const pos = bot.positions[idx];
-  const e = cache[ticker] || marketCache[ticker];
+
+  // Vendre au cours de l'instant, pas à celui du dernier scan (voir botPrixFrais).
+  let e = cache[ticker] || marketCache[ticker];
+  if (!botPrixFrais(e)) {
+    try {
+      await analyzeTicker(ticker, null, {
+        silent: true, skipRender: true, fresh: true, skipFund: true,
+        store: cache[ticker] ? cache : marketCache,
+      });
+      e = cache[ticker] || marketCache[ticker];
+    } catch (_) { /* on retombe sur le dernier cours connu, signalé ci-dessous */ }
+  }
+  const frais = botPrixFrais(e);
   const price = (e && e.ind && e.ind.price > 0) ? e.ind.price : pos.entryPrice;
+  if (!frais) toast(`Cours de ${ticker} non rafraîchi : vente enregistrée au dernier cours connu.`, "warn");
   const { cashIn, net } = botApplyExitProceeds(price, pos.qty, bot.config);
   bot.cash += cashIn;
   bot.history.unshift({ ticker, family: pos.family, entryDate: pos.entryDate, entryPrice: pos.entryPrice,
@@ -559,6 +572,37 @@ function botApplyTick(pos, price, dateStr) {
 function botAgeDays(entryDate, now = Date.now()) {
   return (now - new Date(entryDate).getTime()) / 86400000;
 }
+
+/* Fraîcheur exigée d'un cours pour engager de l'argent dessus.
+ *
+ * Le bot lisait auparavant le cours mémorisé lors du dernier scan du marché — souvent
+ * vieux de plusieurs heures, parfois de plusieurs jours. Il achetait donc à un prix qui
+ * n'existait plus, et ses stops étaient calculés à partir de ce prix fantôme.
+ * Cinq minutes : assez court pour que le cours soit celui de l'instant, assez long pour
+ * ne pas retélécharger le même titre à chaque passe d'une même évaluation. */
+const BOT_FRAICHEUR_MS = 5 * 60 * 1000;
+
+// Plafond de cours rafraîchis par évaluation. Le bot n'ouvre qu'une poignée de positions
+// à la fois ; pricer les quinze meilleurs candidats suffit largement, et borne le trafic
+// vers Yahoo quel que soit le nombre de titres remontés par le scan marché.
+const BOT_MAX_RAFRAICHISSEMENTS = 15;
+
+function botPrixFrais(entry, now = Date.now()) {
+  if (!entry || !entry.updated || !entry.ind || !(entry.ind.price > 0)) return false;
+  const age = now - new Date(entry.updated).getTime();
+  return isFinite(age) && age >= 0 && age <= BOT_FRAICHEUR_MS;
+}
+
+botTest("botPrixFrais: refuse un cours absent, périmé ou nul", () => {
+  const t = (min, prix = 100) => ({ updated: new Date(Date.now() - min * 60000).toISOString(), ind: { price: prix } });
+  botAssertEq(botPrixFrais(null), false);
+  botAssertEq(botPrixFrais({ updated: new Date().toISOString() }), false);   // pas d'indicateurs
+  botAssertEq(botPrixFrais(t(0)), true);
+  botAssertEq(botPrixFrais(t(4)), true);
+  botAssertEq(botPrixFrais(t(6)), false);                                    // au-delà de 5 min
+  botAssertEq(botPrixFrais(t(1440)), false);                                 // la veille
+  botAssertEq(botPrixFrais(t(1, 0)), false);                                 // cours nul
+});
 
 /* Frais et slippage — appliqués à l'entrée ET à la sortie.
  * Les trades déjà présents dans bot.history ne sont pas réécrits : leurs
@@ -630,11 +674,20 @@ async function runBot() {
     if (openMarkets.size === 0) botLog("info", null, "Hors séance — rattrapage des clôtures seulement, aucun achat.");
 
     // a) rafraîchir les positions détenues (best-effort : une panne n'interrompt pas l'évaluation)
+    //
+    // `isStale` (24 h) servait ici : c'est le bon seuil pour décider s'il faut retélécharger
+    // un historique à afficher, pas pour décider d'un stop. Un stop évalué sur le cours de la
+    // veille se déclenche avec un jour de retard. On exige donc un cours de moins de 5 min,
+    // et on traverse le cache du serveur pour l'obtenir.
     for (const pos of bot.positions) {
       const e = cache[pos.ticker] || marketCache[pos.ticker];
-      if (!e || isStale(e)) {
-        try { await analyzeTicker(pos.ticker, null, { silent: true, skipRender: true, store: cache[pos.ticker] ? cache : marketCache }); }
-        catch (_) { /* on évalue avec ce qu'on a */ }
+      if (!botPrixFrais(e)) {
+        try {
+          await analyzeTicker(pos.ticker, null, {
+            silent: true, skipRender: true, fresh: true,
+            store: cache[pos.ticker] ? cache : marketCache,
+          });
+        } catch (_) { /* on évalue avec ce qu'on a */ }
       }
     }
 
@@ -733,9 +786,45 @@ async function runBot() {
       botLog("info", null, `Aucun des ${bilan.candidats} titres scannés n'atteint le score d'achat minimum (${cfg.qualityMin}).`);
     }
 
+    // Rafraîchir un cours coûte une requête. Les candidats étant triés par score décroissant,
+    // les meilleurs passent en premier : au-delà de ce plafond, on arrête d'en examiner
+    // plutôt que d'envoyer des centaines de requêtes à Yahoo toutes les quinze minutes —
+    // ce qui nous ferait limiter (429) et priverait l'app de données.
+    let rafraichissements = 0;
+
     for (const cand of candidates) {
+      // Plus rien à investir : inutile de continuer à prospecter (et à payer des requêtes).
+      if (bot.cash < 1) break;
+
       const market = botMarketOf(cand.t);
       if (!openMarkets.has(market)) { refuser(`Marché ${market} fermé — achats suspendus.`); continue; }
+
+      // Cours de l'instant, AVANT toute décision sur ce titre. Le candidat sort du cache du
+      // scan marché, qui peut dater de plusieurs heures : juger et acheter sur ce prix-là,
+      // c'est acheter à un cours qui n'existe plus et poser des stops autour d'un fantôme.
+      if (!botPrixFrais(cand.e)) {
+        if (rafraichissements >= BOT_MAX_RAFRAICHISSEMENTS) {
+          refuser(`${BOT_MAX_RAFRAICHISSEMENTS} cours rafraîchis — examen des candidats suivants reporté à la prochaine évaluation.`);
+          break;
+        }
+        rafraichissements++;
+        let rafraichi = null;
+        try {
+          await analyzeTicker(cand.t, null, { silent: true, skipRender: true, fresh: true, store: marketCache, skipFund: true });
+          rafraichi = marketCache[cand.t];
+        } catch (_) { /* traité juste en dessous, comme un cours indisponible */ }
+        if (!botPrixFrais(rafraichi)) {
+          refuser(`Cours de ${cand.t} indisponible — achat annulé plutôt qu'exécuté à un prix périmé.`);
+          continue;
+        }
+        cand.e = rafraichi;
+        // Le cours a bougé, donc le score aussi : on revérifie le seuil au lieu d'acheter
+        // sur la foi d'une note calculée sur l'ancien prix.
+        if (computeGlobalScore(cand.e) < cfg.qualityMin) {
+          refuser(`${cand.t} repasse sous le score minimum une fois le cours rafraîchi.`);
+          continue;
+        }
+      }
 
       // Seuil de qualité relevé sur les familles qui perdent de l'argent.
       const qAdj = botQualityAdjFor(cand.t, cand.e.ind, bot.learn);
@@ -767,7 +856,9 @@ async function runBot() {
       });
       exposureByMarket[market] = marketExp + prof.amount;
       held.add(cand.t);
-      botLog("achat", cand.t, `ACHAT ${cand.t} — ${prof.why}`);
+      const heure = new Date().toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" });
+      botLog("achat", cand.t, `ACHAT ${cand.t} à ${fnum(filled)} à ${heure} `
+        + `(cours ${fnum(cand.e.ind.price)}, slippage ${cfg.slipPct} % inclus) — ${prof.why}`);
       bilan.achats++;
     }
 

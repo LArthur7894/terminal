@@ -411,9 +411,14 @@ class Handler(SimpleHTTPRequestHandler):
             return self.send_json(
                 {"error": "symbol", "message": "Ticker manquant ou invalide."}, 400)
 
-        cached = _history_cache_get(sym)
-        if cached is not None:
-            return self.send_json(cached)
+        # `fresh=1` court-circuite le cache : le bot doit décider sur le cours de l'instant,
+        # pas sur celui d'il y a quinze minutes. La réponse obtenue rafraîchit quand même
+        # le cache, dont profitent ensuite les scans.
+        frais = (qs.get("fresh") or ["0"])[0] == "1"
+        if not frais:
+            cached = _history_cache_get(sym)
+            if cached is not None:
+                return self.send_json(cached)
 
         url = YAHOO_URL.format(sym=urllib.parse.quote(sym))
         req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
