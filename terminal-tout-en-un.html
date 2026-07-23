@@ -3524,6 +3524,57 @@ reviewTest("reviewVerdict: non analysé → garder sans crash", () => {
   botAssert(v.verdict === "garder" && v.reasons.length === 1);
 });
 
+// Meilleur titre du même secteur dans `universe`, si son score dépasse d'au moins 8 points.
+function reviewSectorAlt(entry, universe) {
+  const sector = entry.fund && entry.fund.sector;
+  if (!sector) return null;
+  const you = reviewGlobal(entry);
+  if (you == null) return null;
+  let best = null;
+  for (const c of universe) {
+    if (!c || c.ticker === entry.ticker) continue;
+    if (!c.fund || c.fund.sector !== sector) continue;
+    const s = reviewGlobal(c);
+    if (s == null || s < you + 8) continue;
+    if (!best || s > best.scoreThem) best = { ticker: c.ticker, sector, scoreThem: s, scoreYou: you };
+  }
+  return best;
+}
+
+/* ---------- tests : alternative sectorielle ---------- */
+
+reviewTest("reviewSectorAlt: trouve un meilleur titre du même secteur", () => {
+  const you = reviewMkEntry({ ticker: "MC.PA", score: 55, fund: { sector: "Consumer Cyclical" } });
+  const uni = [
+    reviewMkEntry({ ticker: "RMS.PA", score: 78, fund: { sector: "Consumer Cyclical" } }),
+    reviewMkEntry({ ticker: "AAPL",   score: 90, fund: { sector: "Technology" } }),
+  ];
+  const alt = reviewSectorAlt(you, uni);
+  botAssertEq(alt.ticker, "RMS.PA");
+  botAssertEq(alt.scoreThem, 78);
+  botAssertEq(alt.scoreYou, 55);
+});
+
+reviewTest("reviewSectorAlt: écart < 8 → aucune alternative", () => {
+  const you = reviewMkEntry({ ticker: "MC.PA", score: 72, fund: { sector: "Consumer Cyclical" } });
+  const uni = [reviewMkEntry({ ticker: "RMS.PA", score: 76, fund: { sector: "Consumer Cyclical" } })];
+  botAssertEq(reviewSectorAlt(you, uni), null);
+});
+
+reviewTest("reviewSectorAlt: secteur inconnu → null", () => {
+  const you = reviewMkEntry({ ticker: "X", score: 40, fund: null });
+  botAssertEq(reviewSectorAlt(you, [reviewMkEntry({ ticker: "Y", score: 90, fund: { sector: "Technology" } })]), null);
+});
+
+reviewTest("reviewSectorAlt: ignore soi-même et les autres secteurs", () => {
+  const you = reviewMkEntry({ ticker: "MC.PA", score: 55, fund: { sector: "Consumer Cyclical" } });
+  const uni = [
+    reviewMkEntry({ ticker: "MC.PA", score: 99, fund: { sector: "Consumer Cyclical" } }), // soi-même
+    reviewMkEntry({ ticker: "TTE.PA", score: 99, fund: { sector: "Energy" } }),           // autre secteur
+  ];
+  botAssertEq(reviewSectorAlt(you, uni), null);
+});
+
 /* ============================= FETCH FONDAMENTAUX ============================= */
 
 async function fetchFundamentals(ticker) {
