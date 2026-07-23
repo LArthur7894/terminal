@@ -3575,6 +3575,97 @@ reviewTest("reviewSectorAlt: ignore soi-même et les autres secteurs", () => {
   botAssertEq(reviewSectorAlt(you, uni), null);
 });
 
+// Synthèse du portefeuille. entryOf/valueOf injectés pour rester pur et testable.
+function reviewPortfolio(positions, entryOf, valueOf) {
+  let total = 0, healthNum = 0, healthDen = 0;
+  const bySector = {};
+  const counts = { garder: 0, alleger: 0, vendre: 0 };
+  const priorities = [];
+
+  for (const pos of positions) {
+    const entry = entryOf(pos);
+    const v = valueOf(pos);
+    const val = (v && v.ok && isFinite(v.value)) ? v.value : 0;
+    total += val;
+    const sector = (entry && entry.fund && entry.fund.sector) || "Secteur inconnu";
+    bySector[sector] = (bySector[sector] || 0) + val;
+
+    if (entry && entry.ind) {
+      const vd = reviewVerdict(pos, entry);
+      counts[vd.verdict]++;
+      const g = reviewGlobal(entry);
+      if (g != null) { healthNum += g * val; healthDen += val; }
+      priorities.push({ ticker: pos.ticker, verdict: vd.verdict, reason: vd.reasons[0], score: g,
+        weight: vd.verdict === "vendre" ? 2 : vd.verdict === "alleger" ? 1 : 0 });
+    } else {
+      priorities.push({ ticker: pos.ticker, verdict: null, reason: "non analysé", score: null, weight: -1 });
+    }
+  }
+
+  const alerts = [];
+  for (const pos of positions) {
+    const v = valueOf(pos);
+    const val = (v && v.ok && isFinite(v.value)) ? v.value : 0;
+    if (total > 0 && val / total > 0.40) alerts.push(`${pos.ticker} pèse ${Math.round(val / total * 100)} % du portefeuille`);
+  }
+  for (const [sec, val] of Object.entries(bySector)) {
+    if (sec !== "Secteur inconnu" && total > 0 && val / total > 0.40) alerts.push(`${Math.round(val / total * 100)} % en ${sec}`);
+  }
+
+  priorities.sort((a, b) => (b.weight - a.weight) || ((a.score == null ? 999 : a.score) - (b.score == null ? 999 : b.score)));
+  const health = healthDen > 0 ? Math.round(healthNum / healthDen) : null;
+  return { total, bySector, alerts, health, counts, priorities };
+}
+
+/* ---------- tests : bilan ---------- */
+
+reviewTest("reviewPortfolio: répartition secteur et santé pondérée par la valeur", () => {
+  const positions = [reviewMkPos({ ticker: "A" }), reviewMkPos({ ticker: "B" })];
+  const entries = {
+    A: reviewMkEntry({ ticker: "A", score: 80, fund: { sector: "Tech" } }),
+    B: reviewMkEntry({ ticker: "B", score: 40, fund: { sector: "Energy" } }),
+  };
+  const val = { A: 900, B: 100 };
+  const r = reviewPortfolio(positions, p => entries[p.ticker], p => ({ value: val[p.ticker], ok: true }));
+  botAssertEq(r.total, 1000);
+  botAssertEq(r.bySector.Tech, 900);
+  // santé pondérée : (80×900 + 40×100)/1000 = 76, pas la moyenne simple 60
+  botAssertEq(r.health, 76);
+});
+
+reviewTest("reviewPortfolio: alerte concentration > 40 %", () => {
+  const positions = [reviewMkPos({ ticker: "A" }), reviewMkPos({ ticker: "B" })];
+  const entries = { A: reviewMkEntry({ ticker: "A", score: 70 }), B: reviewMkEntry({ ticker: "B", score: 70 }) };
+  const val = { A: 800, B: 200 };
+  const r = reviewPortfolio(positions, p => entries[p.ticker], p => ({ value: val[p.ticker], ok: true }));
+  botAssert(r.alerts.some(a => a.includes("A") && a.includes("80")), "A pèse 80 %");
+});
+
+reviewTest("reviewPortfolio: priorités classent vendre avant garder", () => {
+  const positions = [reviewMkPos({ ticker: "KEEP" }), reviewMkPos({ ticker: "SELL" })];
+  const entries = {
+    KEEP: reviewMkEntry({ ticker: "KEEP", score: 75 }),
+    SELL: reviewMkEntry({ ticker: "SELL", score: 20 }),
+  };
+  const r = reviewPortfolio(positions, p => entries[p.ticker], p => ({ value: 500, ok: true }));
+  botAssertEq(r.priorities[0].ticker, "SELL");
+  botAssertEq(r.counts.vendre, 1);
+  botAssertEq(r.counts.garder, 1);
+});
+
+reviewTest("reviewPortfolio: position non analysée → santé neutre, sans crash", () => {
+  const r = reviewPortfolio([reviewMkPos({ ticker: "A" })], () => null, () => ({ value: 100, ok: true }));
+  botAssertEq(r.health, null);
+  botAssertEq(r.bySector["Secteur inconnu"], 100);
+});
+
+reviewTest("reviewPortfolio: portefeuille vide → bilan neutre", () => {
+  const r = reviewPortfolio([], () => null, () => ({ value: 0, ok: true }));
+  botAssertEq(r.total, 0);
+  botAssertEq(r.health, null);
+  botAssertEq(r.alerts.length, 0);
+});
+
 /* ============================= FETCH FONDAMENTAUX ============================= */
 
 async function fetchFundamentals(ticker) {
