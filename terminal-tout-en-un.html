@@ -3360,6 +3360,95 @@ function computeGlobalScore(entry) {
   return Math.round(entry.score * weightTech + entry.fundScore.total * (1 - weightTech));
 }
 
+/* ============================= REVUE DE PORTEFEUILLE =============================
+ * Aide à la décision fondée sur des règles transparentes — pas un conseil. Fonctions
+ * pures testées par reviewSelfTest() (réutilise le harnais botTest/botAssert*).
+ * ============================================================================ */
+
+const REVIEW_TEST_CASES = [];
+function reviewTest(name, fn) { REVIEW_TEST_CASES.push({ name, fn }); }
+
+function reviewSelfTest() {
+  let pass = 0, fail = 0;
+  const report = [];
+  for (const { name, fn } of REVIEW_TEST_CASES) {
+    try { fn(); pass++; report.push({ name, ok: true }); }
+    catch (e) { fail++; report.push({ name, ok: false, err: String((e && e.message) || e) }); }
+  }
+  const total = REVIEW_TEST_CASES.length;
+  console.log(`[reviewSelfTest] ${pass}/${total} passed, ${fail} failed`);
+  for (const r of report) console.log(r.ok ? `  ✓ ${r.name}` : `  ✗ ${r.name} — ${r.err}`);
+  return { pass, fail, total, report };
+}
+
+// Score global d'une entrée (technique + fondamental), ou null si jamais analysée.
+function reviewGlobal(entry) {
+  if (!entry || entry.score == null) return null;
+  return computeGlobalScore(entry);
+}
+
+// Distance de stop (%) adaptée à la volatilité — même logique que le bot, bornée 5–20.
+function reviewStopPct(vol) { return clamp(0.40 * (isFinite(vol) ? vol : 30), 5, 20); }
+
+// Plus haut exploitable : max des clôtures en cache et du cours courant. null si rien.
+function reviewHighest(entry) {
+  const price = (entry && entry.ind && isFinite(entry.ind.price)) ? entry.ind.price : null;
+  const closes = (entry && entry.hist && Array.isArray(entry.hist.closes))
+    ? entry.hist.closes.filter(c => isFinite(c) && c > 0) : [];
+  if (!closes.length) return price;
+  return Math.max(Math.max(...closes), price || 0);
+}
+
+// Stops initial (sous le cours) et suiveur (sous le plus haut), + effet vs PRU en %.
+function reviewStops(pos, entry) {
+  const price = entry.ind.price;
+  const stopPct = reviewStopPct(entry.ind.vol);
+  const initialLevel = price * (1 - stopPct / 100);
+  const highest = reviewHighest(entry);
+  const trailLevel = (highest || price) * (1 - 0.8 * stopPct / 100);
+  const vsPru = (lvl) => (pos.pru > 0 && isFinite(lvl)) ? (lvl / pos.pru - 1) * 100 : null;
+  return { stopPct, initialLevel, trailLevel, highest, initialVsPru: vsPru(initialLevel), trailVsPru: vsPru(trailLevel) };
+}
+
+/* ---------- tests : stops ---------- */
+
+function reviewMkEntry(over = {}) {
+  return {
+    ticker: over.ticker || "TEST",
+    score: over.score != null ? over.score : 70,
+    signal: over.signal || "Neutre",
+    fund: over.fund || null,
+    fundScore: over.fundScore || null,
+    hist: over.hist || null,
+    ind: { price: 100, vol: 30, rsi: 50, rangePos: 50, perf: { m1: 0, m3: 0, y1: 0 }, ...(over.ind || {}) },
+  };
+}
+function reviewMkPos(over = {}) { return { id: 1, ticker: "TEST", qty: 10, pru: 90, ...over }; }
+
+reviewTest("reviewStopPct: borné 5–20", () => {
+  botAssertEq(reviewStopPct(5), 5);
+  botAssertEq(reviewStopPct(80), 20);
+  botAssertClose(reviewStopPct(30), 12, 1e-9);
+});
+
+reviewTest("reviewHighest: max clôtures + cours, null si rien", () => {
+  botAssertEq(reviewHighest(reviewMkEntry({ ind: { price: 100 }, hist: { closes: [90, 120, 80] } })), 120);
+  botAssertEq(reviewHighest(reviewMkEntry({ ind: { price: 150 }, hist: { closes: [90, 120] } })), 150);
+  botAssertEq(reviewHighest(reviewMkEntry({ ind: { price: 100 } })), 100);
+});
+
+reviewTest("reviewStops: initial sous le cours, effet vs PRU", () => {
+  const s = reviewStops(reviewMkPos({ pru: 90 }), reviewMkEntry({ ind: { price: 100, vol: 30 } }));
+  botAssertClose(s.stopPct, 12, 1e-9);
+  botAssertClose(s.initialLevel, 88, 1e-9);            // 100 × (1 − 12 %)
+  botAssert(s.initialVsPru < 0, "88 < PRU 90 → limite une perte");
+});
+
+reviewTest("reviewStops: stop sécurisant un gain quand le cours a monté", () => {
+  const s = reviewStops(reviewMkPos({ pru: 50 }), reviewMkEntry({ ind: { price: 100, vol: 10 } }));
+  botAssert(s.initialVsPru > 0, "stop au-dessus du PRU → sécurise un gain");
+});
+
 /* ============================= FETCH FONDAMENTAUX ============================= */
 
 async function fetchFundamentals(ticker) {
