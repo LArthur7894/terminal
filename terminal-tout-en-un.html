@@ -3666,6 +3666,47 @@ reviewTest("reviewPortfolio: portefeuille vide → bilan neutre", () => {
   botAssertEq(r.alerts.length, 0);
 });
 
+// Meilleures opportunités du scan non détenues, avec bonus aux secteurs peu exposés (< 10 %).
+function reviewAdditions(positions, marketEntries, bySector, total, n = 5) {
+  const held = new Set(positions.map(p => p.ticker));
+  const share = (sec) => (total > 0 && bySector[sec]) ? bySector[sec] / total : 0;
+  return marketEntries
+    .filter(e => e && e.ticker && !held.has(e.ticker))
+    .map(e => ({ e, g: reviewGlobal(e) }))
+    .filter(x => x.g != null && x.g >= 65)
+    .map(x => {
+      const sector = (x.e.fund && x.e.fund.sector) || "Secteur inconnu";
+      return { ticker: x.e.ticker, sector, score: x.g, sortKey: x.g + (share(sector) < 0.10 ? 10 : 0) };
+    })
+    .sort((a, b) => b.sortKey - a.sortKey)
+    .slice(0, n)
+    .map(({ ticker, sector, score }) => ({ ticker, sector, score }));
+}
+
+/* ---------- tests : suggestions ---------- */
+
+reviewTest("reviewAdditions: exclut les titres détenus et sous le seuil 65", () => {
+  const positions = [reviewMkPos({ ticker: "HELD" })];
+  const market = [
+    reviewMkEntry({ ticker: "HELD", score: 90 }),   // détenu → exclu
+    reviewMkEntry({ ticker: "LOW",  score: 50 }),   // < 65 → exclu
+    reviewMkEntry({ ticker: "GOOD", score: 80 }),
+  ];
+  const out = reviewAdditions(positions, market, {}, 0);
+  botAssertEq(out.length, 1);
+  botAssertEq(out[0].ticker, "GOOD");
+});
+
+reviewTest("reviewAdditions: bonus au secteur sous-exposé", () => {
+  const market = [
+    reviewMkEntry({ ticker: "TECHONLY", score: 82, fund: { sector: "Tech" } }),     // secteur déjà à 90 %
+    reviewMkEntry({ ticker: "NEWSEC",   score: 74, fund: { sector: "Health" } }),   // secteur à 0 %
+  ];
+  const bySector = { Tech: 900 }, total = 1000;
+  const out = reviewAdditions([], market, bySector, total);
+  botAssertEq(out[0].ticker, "NEWSEC");   // 74 + 10 (sous-exposé) = 84 > 82
+});
+
 /* ============================= FETCH FONDAMENTAUX ============================= */
 
 async function fetchFundamentals(ticker) {
