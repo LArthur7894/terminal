@@ -1244,6 +1244,14 @@ function saveProfileList(list) {
 // Choisit (ou crée) le profil actif. Bloquant volontairement (window.prompt) : l'app
 // ne doit lire aucune donnée tant qu'on ne sait pas de quel profil il s'agit.
 function pickProfile() {
+  // Mode auto-tests : jamais de fenêtre bloquante. `window.prompt` suspend TOUT le script
+  // tant qu'on n'a pas répondu — dans un navigateur automatisé (ou si prompt est désactivé),
+  // la page reste figée et rien ne s'initialise. On travaille alors sur un profil dédié,
+  // ce qui a l'avantage de ne toucher à aucune donnée réelle.
+  // Note : on relit location.search ici plutôt que d'utiliser SELFTEST_MODE, déclaré bien
+  // plus bas — une const y serait dans sa zone morte temporelle à ce stade du chargement.
+  if (new URLSearchParams(location.search).has("selftest")) return "__selftest__";
+
   const profiles = loadProfileList();
   const remembered = localStorage.getItem(CURRENT_PROFILE_KEY);
   if (remembered && profiles.includes(remembered)) return remembered;
@@ -1690,7 +1698,10 @@ function botProfile(entry, cfg, learn, portfolioValue, cash, marketExposure = 0)
   // Ratio gain/risque : croît avec le score, bonifié par la tendance, pénalisé en haut de range.
   let rr = cfg.rrMin + Math.max(0, score - cfg.qualityMin) / Math.max(1, 100 - cfg.qualityMin) * (cfg.rrMax - cfg.rrMin);
   if (ind.price > 0 && ind.sma50 > 0 && ind.sma200 > 0 && ind.price > ind.sma50 && ind.sma50 > ind.sma200) rr += 0.3;
-  if (ind.rangePos != null && ind.rangePos > 90) rr -= 0.3;
+  // rangePos est une FRACTION 0..1 (voir computeIndicators), pas un pourcentage :
+  // le seuil du haut de range est donc 0,9 et non 90. Comparé à 90, ce test ne pouvait
+  // jamais être vrai et la pénalité n'était jamais appliquée.
+  if (ind.rangePos != null && ind.rangePos > 0.9) rr -= 0.3;
   rr = clamp(rr * fam.rrMult, 1.2, 4);
   const targetPct = stopPct * rr;
 
@@ -1719,7 +1730,8 @@ function botMkEntry(ticker, over = {}) {
   return {
     ticker,
     score: over.score != null ? over.score : 75,
-    ind: { price: 100, vol: 30, sma50: 95, sma200: 90, rangePos: 50, ...(over.ind || {}) },
+    // rangePos en fraction 0..1, comme le renvoie computeIndicators (0,5 = milieu de range).
+    ind: { price: 100, vol: 30, sma50: 95, sma200: 90, rangePos: 0.5, ...(over.ind || {}) },
   };
 }
 
@@ -1745,8 +1757,8 @@ botTest("botProfile: +0,3 tendance haussière confirmée", () => {
 
 botTest("botProfile: −0,3 en haut de range", () => {
   const cfg = BOT_V2_DEFAULT_CONFIG;
-  const top = botProfile(botMkEntry("A", { ind: { rangePos: 95 } }), cfg, {}, 10000, 10000);
-  const mid = botProfile(botMkEntry("B", { ind: { rangePos: 50 } }), cfg, {}, 10000, 10000);
+  const top = botProfile(botMkEntry("A", { ind: { rangePos: 0.95 } }), cfg, {}, 10000, 10000);
+  const mid = botProfile(botMkEntry("B", { ind: { rangePos: 0.5 } }), cfg, {}, 10000, 10000);
   botAssertClose(mid.rr - top.rr, 0.3, 1e-9, "le haut de range devrait retirer 0,3 au RR");
 });
 
@@ -3446,7 +3458,8 @@ function reviewMkEntry(over = {}) {
     fund: over.fund || null,
     fundScore: over.fundScore || null,
     hist: over.hist || null,
-    ind: { price: 100, vol: 30, rsi: 50, rangePos: 50, perf: { m1: 0, m3: 0, y1: 0 }, ...(over.ind || {}) },
+    // rangePos en fraction 0..1, comme le renvoie computeIndicators (0,5 = milieu de range).
+    ind: { price: 100, vol: 30, rsi: 50, rangePos: 0.5, perf: { m1: 0, m3: 0, y1: 0 }, ...(over.ind || {}) },
   };
 }
 function reviewMkPos(over = {}) { return { id: 1, ticker: "TEST", qty: 10, pru: 90, ...over }; }
@@ -3489,7 +3502,8 @@ function reviewVerdict(pos, entry) {
   if (entry.signal === "Vente") sell.push("signal technique à la vente");
   if (g != null && g < 50 && m1 != null && m1 < -10) sell.push(`score faible et forte baisse récente (${fpct(m1)})`);
 
-  if (ind.rangePos != null && ind.rangePos > 90) trim.push("au sommet de son range 52 semaines");
+  // Seuil sur la fraction 0..1 renvoyée par computeIndicators (0,9 = 90 % du range).
+  if (ind.rangePos != null && ind.rangePos > 0.9) trim.push("au sommet de son range 52 semaines");
   if (ind.rsi != null && ind.rsi > 70) trim.push(`suracheté (RSI ${Math.round(ind.rsi)})`);
   if (pnlPct != null && pnlPct > 40 && g != null && g < 60) trim.push(`forte plus-value (${fpct(pnlPct)}) sur un titre qui faiblit — sécuriser`);
   if (g != null && g >= 35 && g < 50) trim.push(`signaux mitigés (${g}/100)`);
@@ -3524,7 +3538,7 @@ reviewTest("reviewVerdict: signal Vente → vendre", () => {
 });
 
 reviewTest("reviewVerdict: haut de range → alléger", () => {
-  botAssertEq(reviewVerdict(reviewMkPos(), reviewMkEntry({ score: 60, ind: { price: 100, rangePos: 95 } })).verdict, "alleger");
+  botAssertEq(reviewVerdict(reviewMkPos(), reviewMkEntry({ score: 60, ind: { price: 100, rangePos: 0.95 } })).verdict, "alleger");
 });
 
 reviewTest("reviewVerdict: forte plus-value + score faible → alléger", () => {
@@ -3540,7 +3554,7 @@ reviewTest("reviewVerdict: score ≥ 60 solide → garder", () => {
 // Score 50 : la règle « signaux mitigés » couvre 35 ≤ g < 50, donc 50 n'y tombe pas → aucune
 // raison sell/trim → « garder », conviction faible (45 ≤ 50 ≤ 55).
 reviewTest("reviewVerdict: zone grise (50) → garder, conviction faible", () => {
-  const v = reviewVerdict(reviewMkPos(), reviewMkEntry({ score: 50, ind: { price: 100, rangePos: 50, rsi: 50 } }));
+  const v = reviewVerdict(reviewMkPos(), reviewMkEntry({ score: 50, ind: { price: 100, rangePos: 0.5, rsi: 50 } }));
   botAssertEq(v.verdict, "garder");
   botAssertEq(v.conviction, "faible");
 });
@@ -3548,6 +3562,31 @@ reviewTest("reviewVerdict: zone grise (50) → garder, conviction faible", () =>
 reviewTest("reviewVerdict: non analysé → garder sans crash", () => {
   const v = reviewVerdict(reviewMkPos(), reviewMkEntry({ score: null }));
   botAssert(v.verdict === "garder" && v.reasons.length === 1);
+});
+
+/* ---------- test de bout en bout : indicateurs réels → verdict ----------
+ * Les autres tests utilisent des fixtures écrites à la main. Rien n'y garantissait que
+ * ces fixtures aient la même ÉCHELLE que les vraies sorties de computeIndicators — et
+ * c'est précisément ce qui avait laissé passer un seuil `rangePos > 90` sur une valeur
+ * qui vaut au plus 1. Ce test part donc d'un historique et traverse la vraie chaîne. */
+
+// Historique synthétique : 260 clôtures montant de 50 à 100, le cours du jour au sommet.
+function reviewMkHist(n = 260, low = 50, high = 100) {
+  const chrono = Array.from({ length: n }, (_, i) => low + (high - low) * (i / (n - 1)));
+  return { closes: chrono.reverse(), dates: chrono.map((_, i) => `2026-01-${String((i % 28) + 1).padStart(2, "0")}`) };
+}
+
+reviewTest("chaîne réelle : computeIndicators renvoie rangePos dans 0..1", () => {
+  const ind = computeIndicators(reviewMkHist());
+  botAssert(ind.rangePos >= 0 && ind.rangePos <= 1, `rangePos hors de 0..1 : ${ind.rangePos}`);
+  botAssertClose(ind.rangePos, 1, 1e-9, "cours au plus haut → rangePos = 1");
+});
+
+reviewTest("chaîne réelle : titre au sommet du range → alléger", () => {
+  const hist = reviewMkHist();
+  const ind = computeIndicators(hist);
+  const entry = { ticker: "TOP", score: 60, signal: "Neutre", fund: null, fundScore: null, hist, ind };
+  botAssertEq(reviewVerdict(reviewMkPos({ pru: 95 }), entry).verdict, "alleger");
 });
 
 // Meilleur titre du même secteur dans `universe`, si son score dépasse d'au moins 8 points.
@@ -6730,9 +6769,47 @@ function renderAll() {
   checkAlerts();
 }
 
+/* ============================= AUTO-TESTS (?selftest=1) =============================
+ * Les trois harnais (bot, fondamentaux, revue) n'étaient appelables qu'à la main depuis
+ * la console : en pratique, personne ne les lançait. Ouvrir l'app avec ?selftest=1 les
+ * exécute tous et affiche le bilan par-dessus la page — un coup d'œil suffit pour savoir
+ * si une modification a cassé quelque chose. Sans le paramètre, rien de tout ceci ne tourne.
+ * ============================================================================ */
+
+function runAllSelfTests() {
+  const suites = [
+    { nom: "bot", res: botSelfTest() },
+    { nom: "fondamentaux", res: fundSelfTest() },
+    { nom: "revue", res: reviewSelfTest() },
+  ];
+  const pass = suites.reduce((n, s) => n + s.res.pass, 0);
+  const total = suites.reduce((n, s) => n + s.res.total, 0);
+  const fail = total - pass;
+
+  const echecs = suites.flatMap(s => s.res.report.filter(r => !r.ok).map(r => `${s.nom} — ${r.name} : ${r.err}`));
+  const lignes = suites.map(s =>
+    `<li><b>${esc(s.nom)}</b> : ${s.res.pass}/${s.res.total}${s.res.fail ? ` — <span style="color:#ff5c5c">${s.res.fail} en échec</span>` : ""}</li>`).join("");
+
+  const box = document.createElement("div");
+  box.setAttribute("role", "status");
+  box.style.cssText = "position:fixed;inset:auto 16px 16px auto;z-index:9999;max-width:min(560px,92vw);"
+    + "max-height:70vh;overflow:auto;padding:16px 20px;border-radius:8px;font:14px/1.5 'IBM Plex Mono',monospace;"
+    + `background:#12151a;color:#e6e6e6;border:2px solid ${fail ? "#ff5c5c" : "#2ecc71"};box-shadow:0 8px 32px rgba(0,0,0,.6)`;
+  box.innerHTML = `<div style="font-weight:700;color:${fail ? "#ff5c5c" : "#2ecc71"};margin-bottom:8px">`
+    + `${fail ? "✗" : "✓"} AUTO-TESTS ${pass}/${total}</div>`
+    + `<ul style="margin:0 0 8px;padding-left:20px">${lignes}</ul>`
+    + (echecs.length ? `<pre style="white-space:pre-wrap;color:#ff9c9c;margin:0 0 8px">${esc(echecs.join("\n"))}</pre>` : "")
+    + `<div style="opacity:.65;font-size:12px">Détail complet dans la console. Retirez ?selftest=1 pour revenir à l'app.</div>`;
+  document.body.appendChild(box);
+  return { pass, fail, total };
+}
+
+const SELFTEST_MODE = new URLSearchParams(location.search).has("selftest");
+
 /* ============================= INITIALISATION ============================= */
 
 renderAll();
+if (SELFTEST_MODE) runAllSelfTests();
 ensureFxRates(); // pré-charge les taux dès le démarrage si le portefeuille est multi-devises
 
 // Rattrapage best-effort des noms manquants pour des tickers déjà en watchlist

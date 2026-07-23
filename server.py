@@ -33,6 +33,10 @@ HOST = "0.0.0.0" if "PORT" in os.environ else "127.0.0.1"
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 HISTORY_KEEP = 420  # jours de bourse renvoyés (aligné sur app.js)
 
+# Page servie à la racine. Sans elle, SimpleHTTPRequestHandler affiche le listing du
+# dossier — l'app était invisible et .git/ navigable depuis l'extérieur.
+APP_PAGE = "/terminal-tout-en-un.html"
+
 # range=2y suffit largement pour SMA 200 + range 52 semaines
 YAHOO_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{sym}?range=2y&interval=1d"
 # Recherche par nom d'entreprise → liste de tickers correspondants
@@ -87,6 +91,47 @@ _BROWSER_HEADERS = {
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Language": "fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7",
 }
+
+
+# ---------------------------------------------------------------------------
+# Cache mémoire des historiques
+# ---------------------------------------------------------------------------
+# Un scan de marché demande l'historique de plusieurs centaines de titres, 8 en parallèle,
+# et chacun partait en aller-retour complet vers Yahoo — c'est le principal déclencheur des
+# HTTP 429. Les clôtures quotidiennes ne bougeant qu'une fois par jour, quelques minutes de
+# mémoire suffisent à absorber les rescans et les allers-retours entre onglets.
+# Volontairement en mémoire seule : au redémarrage on repart d'un cache vide, sans état à gérer.
+_HISTORY_CACHE = {}                  # {symbole: (expiration_ts, charge_utile)}
+_HISTORY_CACHE_LOCK = threading.Lock()
+_HISTORY_TTL = 900                   # 15 min
+_HISTORY_CACHE_MAX = 1000            # ~40 Ko par entrée → plafond de l'ordre de 40 Mo
+
+
+def _history_cache_get(sym):
+    """Charge utile encore valide pour ce symbole, sinon None."""
+    with _HISTORY_CACHE_LOCK:
+        found = _HISTORY_CACHE.get(sym)
+        if not found:
+            return None
+        expire, payload = found
+        if time.time() >= expire:
+            _HISTORY_CACHE.pop(sym, None)
+            return None
+        return payload
+
+
+def _history_cache_put(sym, payload):
+    """Mémorise une réponse VALIDE (jamais une erreur) et borne la taille du cache."""
+    with _HISTORY_CACHE_LOCK:
+        if len(_HISTORY_CACHE) >= _HISTORY_CACHE_MAX:
+            now = time.time()
+            for k in [k for k, (exp, _) in _HISTORY_CACHE.items() if now >= exp]:
+                _HISTORY_CACHE.pop(k, None)
+            # Toujours plein malgré la purge : on sacrifie les plus proches de l'expiration.
+            if len(_HISTORY_CACHE) >= _HISTORY_CACHE_MAX:
+                for k in sorted(_HISTORY_CACHE, key=lambda k: _HISTORY_CACHE[k][0])[:_HISTORY_CACHE_MAX // 4]:
+                    _HISTORY_CACHE.pop(k, None)
+        _HISTORY_CACHE[sym] = (time.time() + _HISTORY_TTL, payload)
 
 
 def _collect_cookie():
@@ -316,6 +361,22 @@ class Handler(SimpleHTTPRequestHandler):
 
     def do_GET(self):
         parsed = urlparse(self.path)
+
+        # Racine → l'app. Sans cette redirection, SimpleHTTPRequestHandler affichait le
+        # listing du dossier (server.py, tests/, .git/...) au lieu du terminal.
+        if parsed.path == "/":
+            dest = APP_PAGE + (f"?{parsed.query}" if parsed.query else "")
+            self.send_response(302)
+            self.send_header("Location", dest)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+
+        # Rien de ce qui commence par un point n'est public : .git/ contient tout
+        # l'historique du dépôt, .claude/ et .superpowers/ des notes de travail.
+        if any(seg.startswith(".") for seg in parsed.path.split("/") if seg):
+            return self.send_error(404, "Not Found")
+
         if parsed.path == "/api/history":
             self.handle_history(parse_qs(parsed.query))
         elif parsed.path == "/api/search":
@@ -349,6 +410,10 @@ class Handler(SimpleHTTPRequestHandler):
         if not sym or len(sym) > 15:
             return self.send_json(
                 {"error": "symbol", "message": "Ticker manquant ou invalide."}, 400)
+
+        cached = _history_cache_get(sym)
+        if cached is not None:
+            return self.send_json(cached)
 
         url = YAHOO_URL.format(sym=urllib.parse.quote(sym))
         req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
@@ -397,11 +462,13 @@ class Handler(SimpleHTTPRequestHandler):
                 raise ValueError("historique trop court")
 
             currency = (result.get("meta") or {}).get("currency")
-            return self.send_json({
+            payload = {
                 "dates":   [p[0] for p in pairs],
                 "closes":  [p[1] for p in pairs],
                 "currency": currency,
-            })
+            }
+            _history_cache_put(sym, payload)   # seules les réponses valides sont mémorisées
+            return self.send_json(payload)
         except Exception:
             return self.send_json(
                 {"error": "format",
@@ -573,10 +640,20 @@ class Handler(SimpleHTTPRequestHandler):
             return self.send_json(
                 {"error": "format", "message": f"Réponse fondamentale Yahoo inattendue pour {sym}."}, 502)
 
+    def list_directory(self, path):
+        """Aucun listing de dossier, nulle part (/docs/, /tests/...). 404 à la place."""
+        self.send_error(404, "Not Found")
+        return None
+
     # Journal minimal (une ligne par requête API seulement)
     def log_message(self, fmt, *args):
-        if "/api/" in (args[0] if args else ""):
-            print(self.address_string(), "-", args[0])
+        # `args[0]` n'est pas toujours la ligne de requête : log_error() appelle ce même
+        # journal avec un code HTTP entier en premier argument. Le test d'appartenance
+        # levait alors un TypeError qui tuait le fil de la requête — toute réponse 404
+        # (fichier absent, chemin refusé) fermait la connexion sans rien renvoyer.
+        first = str(args[0]) if args else ""
+        if "/api/" in first:
+            print(self.address_string(), "-", first)
 
 
 if __name__ == "__main__":

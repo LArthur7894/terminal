@@ -1,7 +1,9 @@
 // Service worker du Terminal Boursier — coquille en cache, /api/* toujours réseau.
 // Best-effort : toute erreur ici ne doit pas empêcher l'app de fonctionner en ligne.
 
-const CACHE = "terminal-shell-v1";
+// À incrémenter dès que la coquille change : l'activation supprime les anciens caches,
+// ce qui évite de servir une version périmée du terminal après un déploiement.
+const CACHE = "terminal-shell-v2";
 const SHELL = [
   "/terminal-tout-en-un.html",
   "/manifest.webmanifest",
