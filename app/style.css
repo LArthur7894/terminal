@@ -348,6 +348,8 @@ th.sortable:hover { color: var(--amber); }
    feuille, qui écraserait sa hauteur. overflow caché pour qu'un canvas Chart.js
    dimensionné avant un redimensionnement ne puisse jamais élargir la page. */
 .bot-equity-holder { position: relative; height: 200px; margin-top: 10px; overflow: hidden; }
+.backtest-controls { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 10px; }
+.backtest-controls label { color: var(--text-dim); font-size: 12px; }
 .bot-log-row { font-size: 12px; padding: 4px 0; border-bottom: 1px solid var(--border); display: flex; gap: 8px; }
 .bot-log-row:last-child { border-bottom: 0; }
 .bot-log-kind { flex: 0 0 62px; text-transform: uppercase; font-size: 10px; letter-spacing: 1px; padding-top: 2px; }

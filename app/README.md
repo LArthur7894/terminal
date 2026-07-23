@@ -33,6 +33,7 @@ C'est ce qui dicte l'ordre ci-dessous ; en particulier `04-etat.js` vient après
 | `06-revue.js` | Revue de portefeuille |
 | `07-donnees.js` | Change, appels `/api/`, analyse d'un ticker, autocomplétion |
 | `08-` à `14-ui-*.js` | Rendu et câblage, un fichier par groupe d'onglets |
+| `15-backtest.js` | Rejeu de la stratégie du bot sur l'historique (moteur pur + UI, onglet Bot) |
 | `99-init.js` | Auto-tests et amorçage |
 
 Ajouter un fichier : lui donner un numéro cohérent avec ses dépendances, l'insérer

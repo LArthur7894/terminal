@@ -17,6 +17,7 @@ function runAllSelfTests() {
     { nom: "bot", res: botSelfTest() },
     { nom: "fondamentaux", res: fundSelfTest() },
     { nom: "revue", res: reviewSelfTest() },
+    { nom: "backtest", res: backtestSelfTest() },
   ];
   const pass = suites.reduce((n, s) => n + s.res.pass, 0);
   const total = suites.reduce((n, s) => n + s.res.total, 0);
@@ -56,7 +57,7 @@ const SELFTEST_MODE = new URLSearchParams(location.search).has("selftest");
 const MODULES_ATTENDUS = [
   "01-base", "02-indicateurs", "03-fondamentaux", "04-etat", "05-bot", "06-revue",
   "07-donnees", "08-ui-dashboard", "09-ui-positions", "10-ui-analyse", "11-ui-marche",
-  "12-ui-allocation-monde", "13-ui-alertes-bot", "14-ui-comparer",
+  "12-ui-allocation-monde", "13-ui-alertes-bot", "14-ui-comparer", "15-backtest",
   // 99-init signe après ce contrôle : s'il avait échoué, rien de ceci ne tournerait.
 ];
 

@@ -404,6 +404,20 @@
         <div class="bot-equity-holder"><canvas id="bot-equity-canvas"></canvas></div>
       </details>
       <details class="bot-settings">
+        <summary>Backtest (rejeu de la stratégie sur l'historique)</summary>
+        <div class="backtest-controls">
+          <label for="backtest-period">Période</label>
+          <select id="backtest-period">
+            <option value="126">6 mois</option>
+            <option value="252" selected>12 mois</option>
+            <option value="max">Maximum en cache</option>
+          </select>
+          <button class="btn btn-accent" id="backtest-run">Lancer le backtest</button>
+        </div>
+        <div id="backtest-status" class="hint"></div>
+        <div id="backtest-results"></div>
+      </details>
+      <details class="bot-settings">
         <summary>Familles apprises</summary>
         <div id="bot-learn"></div>
       </details>
@@ -461,6 +475,7 @@
   <script src="/app/12-ui-allocation-monde.js"></script>
   <script src="/app/13-ui-alertes-bot.js"></script>
   <script src="/app/14-ui-comparer.js"></script>
+  <script src="/app/15-backtest.js"></script>
   <script src="/app/99-init.js"></script>
 </body>
 </html>

@@ -3,7 +3,7 @@
 
 // À incrémenter dès que la coquille change : l'activation supprime les anciens caches,
 // ce qui évite de servir une version périmée du terminal après un déploiement.
-const CACHE = "terminal-shell-v4";
+const CACHE = "terminal-shell-v5";
 const SHELL = [
   "/",
   "/index.html",
@@ -22,6 +22,7 @@ const SHELL = [
   "/app/12-ui-allocation-monde.js",
   "/app/13-ui-alertes-bot.js",
   "/app/14-ui-comparer.js",
+  "/app/15-backtest.js",
   "/app/99-init.js",
   "/manifest.webmanifest",
   "/icon.svg",
