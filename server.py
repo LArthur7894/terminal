@@ -31,15 +31,32 @@ from datetime import datetime, timezone
 PORT = int(os.environ.get("PORT", 8750))
 HOST = "0.0.0.0" if "PORT" in os.environ else "127.0.0.1"
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
-HISTORY_KEEP = 420  # jours de bourse renvoyés (aligné sur app.js)
+HISTORY_KEEP = 420       # jours de bourse renvoyés par défaut (affichage, aligné sur app.js)
+HISTORY_KEEP_DEEP = 3000  # ~12 ans de séances, pour un backtest multi-cycles (range 5y/10y/max)
+
+# Plages autorisées pour /api/history?range=… . Le défaut (2y) suffit à l'affichage et aux
+# indicateurs ; les plages profondes ne servent qu'au backtest, téléchargées à la demande
+# et jamais persistées en localStorage (sinon on ferait exploser le quota du navigateur).
+RANGE_ALLOWED = {"1y", "2y", "5y", "10y", "max"}
+RANGE_DEEP = {"5y", "10y", "max"}
+
+
+def _normalize_range(rng):
+    """Plage Yahoo valide, repli sur 2y si absente ou non autorisée."""
+    return rng if rng in RANGE_ALLOWED else "2y"
+
+
+def _keep_for_range(rng):
+    """Nombre de séances renvoyées selon la plage (profonde = backtest)."""
+    return HISTORY_KEEP_DEEP if rng in RANGE_DEEP else HISTORY_KEEP
 
 # Ancienne URL de l'app, du temps où tout tenait dans un seul fichier. Les marque-pages
 # et les PWA déjà installées la visent encore : on les renvoie vers la racine plutôt que
 # de leur servir un 404.
 ANCIENNE_PAGE = "/terminal-tout-en-un.html"
 
-# range=2y suffit largement pour SMA 200 + range 52 semaines
-YAHOO_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{sym}?range=2y&interval=1d"
+# range configurable (défaut 2y, jusqu'à max pour le backtest). Voir _normalize_range.
+YAHOO_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{sym}?range={rng}&interval=1d"
 # Recherche par nom d'entreprise → liste de tickers correspondants
 SEARCH_URL = "https://query1.finance.yahoo.com/v1/finance/search?q={q}&quotesCount=8&newsCount=0&listsCount=0"
 # Actualités récentes liées à un ticker (même endpoint de recherche, avec newsCount>0)
@@ -411,16 +428,22 @@ class Handler(SimpleHTTPRequestHandler):
             return self.send_json(
                 {"error": "symbol", "message": "Ticker manquant ou invalide."}, 400)
 
+        rng = _normalize_range((qs.get("range") or ["2y"])[0])
+        keep = _keep_for_range(rng)
+        # La clé de cache inclut la plage : un historique profond (backtest) et un historique
+        # court (affichage) ne doivent pas s'écraser l'un l'autre.
+        cache_key = f"{sym}@{rng}"
+
         # `fresh=1` court-circuite le cache : le bot doit décider sur le cours de l'instant,
         # pas sur celui d'il y a quinze minutes. La réponse obtenue rafraîchit quand même
         # le cache, dont profitent ensuite les scans.
         frais = (qs.get("fresh") or ["0"])[0] == "1"
         if not frais:
-            cached = _history_cache_get(sym)
+            cached = _history_cache_get(cache_key)
             if cached is not None:
                 return self.send_json(cached)
 
-        url = YAHOO_URL.format(sym=urllib.parse.quote(sym))
+        url = YAHOO_URL.format(sym=urllib.parse.quote(sym), rng=rng)
         req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
 
         try:
@@ -462,7 +485,7 @@ class Handler(SimpleHTTPRequestHandler):
                 day = datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d")
                 by_date[day] = float(close)
 
-            pairs = sorted(by_date.items(), reverse=True)[:HISTORY_KEEP]
+            pairs = sorted(by_date.items(), reverse=True)[:keep]
             if len(pairs) < 2:
                 raise ValueError("historique trop court")
 
@@ -472,7 +495,7 @@ class Handler(SimpleHTTPRequestHandler):
                 "closes":  [p[1] for p in pairs],
                 "currency": currency,
             }
-            _history_cache_put(sym, payload)   # seules les réponses valides sont mémorisées
+            _history_cache_put(cache_key, payload)   # seules les réponses valides sont mémorisées
             return self.send_json(payload)
         except Exception:
             return self.send_json(

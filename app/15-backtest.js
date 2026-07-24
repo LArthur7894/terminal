@@ -357,20 +357,81 @@ function renderBacktestChart(res) {
   });
 }
 
+// Plafond de titres téléchargés pour un backtest profond : borne le trafic vers Yahoo
+// (chaque titre = une requête) tout en gardant un univers représentatif.
+const BACKTEST_DEEP_CAP = 100;
+
+// Télécharge un historique profond (5y/max) pour les titres déjà connus (scan + watchlist),
+// sans rien persister : l'univers profond ne vit que le temps du backtest. Le cache 15 min
+// du serveur absorbe les relances rapprochées.
+async function backtestDeepUniverse(range, status) {
+  const tickers = [...new Set([...Object.keys(cache), ...Object.keys(marketCache)])]
+    .filter(t => { const e = cache[t] || marketCache[t]; return e && e.hist && Array.isArray(e.hist.closes); });
+  const total = tickers.length;
+  const list = tickers.slice(0, BACKTEST_DEEP_CAP);
+
+  const universe = [];
+  let done = 0;
+  await runPool(list, async (t) => {
+    try {
+      const hist = await fetchDailySeries(t, { range });
+      const e = cache[t] || marketCache[t];
+      universe.push({ ticker: t, hist, fund: (e && e.fund) || null });
+    } catch (_) { /* un titre qui échoue est simplement ignoré */ }
+    done++;
+    if (done % 5 === 0 || done === list.length) {
+      status.textContent = `Téléchargement de l'historique ${done}/${list.length}…`;
+    }
+  }, 6);
+
+  return { universe, truncated: total > BACKTEST_DEEP_CAP, total };
+}
+
 async function runBacktest() {
   const btn = document.getElementById("backtest-run");
   const status = document.getElementById("backtest-status");
   const sel = document.getElementById("backtest-period");
   if (!btn || !status) return;
 
-  const universe = backtestGatherUniverse();
-  if (!universe.length) {
-    status.textContent = "Aucun titre en cache. Lancez un scan du marché (F5), puis « ★ Enrichir le top ».";
+  const value = sel ? sel.value : "252";
+  const deep = value === "5y" || value === "10y";  // « max » exclu : Yahoo y dégrade le journalier en trimestriel
+  btn.disabled = true;
+
+  let universe, truncated = false;
+  try {
+    if (deep) {
+      // On a besoin d'au moins un titre déjà en cache pour connaître la liste à télécharger.
+      if (![...Object.keys(cache), ...Object.keys(marketCache)].some(t => (cache[t] || marketCache[t])?.hist)) {
+        status.textContent = "Aucun titre en cache. Lancez un scan du marché (F5) avant un backtest profond.";
+        btn.disabled = false;
+        return;
+      }
+      status.textContent = "Téléchargement de l'historique profond…";
+      const deepRes = await backtestDeepUniverse(value, status);  // "5y" ou "10y"
+      universe = deepRes.universe;
+      truncated = deepRes.truncated;
+      if (!universe.length) {
+        status.textContent = "Impossible de télécharger l'historique (Yahoo indisponible ?). Réessayez.";
+        btn.disabled = false;
+        return;
+      }
+    } else {
+      universe = backtestGatherUniverse();
+      if (!universe.length) {
+        status.textContent = "Aucun titre en cache. Lancez un scan du marché (F5), puis « ★ Enrichir le top ».";
+        btn.disabled = false;
+        return;
+      }
+    }
+  } catch (e) {
+    status.textContent = "Erreur pendant le téléchargement : " + ((e && e.message) || e);
+    btn.disabled = false;
     return;
   }
-  const lookback = ({ "126": 126, "252": 252, "max": 100000 })[sel ? sel.value : "252"] || 252;
 
-  btn.disabled = true;
+  // Fenêtre : périodes profondes → tout l'historique téléchargé ; sinon N dernières séances.
+  const lookback = deep ? 100000 : (({ "126": 126, "252": 252 })[value] || 252);
+
   status.textContent = `Rejeu en cours sur ${universe.length} titres…`;
   await new Promise(r => setTimeout(r, 30)); // laisse le statut se peindre avant le calcul synchrone
 
@@ -384,6 +445,7 @@ async function runBacktest() {
   }
   status.textContent = res.ok
     ? `Rejeu terminé — ${res.params.tickers} titres, ${res.params.days} séances.`
+      + (truncated ? ` (univers limité aux ${BACKTEST_DEEP_CAP} premiers titres).` : "")
     : "";
   renderBacktestResults(res);
   btn.disabled = false;

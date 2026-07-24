@@ -408,9 +408,10 @@
         <div class="backtest-controls">
           <label for="backtest-period">Période</label>
           <select id="backtest-period">
-            <option value="126">6 mois</option>
-            <option value="252" selected>12 mois</option>
-            <option value="max">Maximum en cache</option>
+            <option value="126">6 mois (cache)</option>
+            <option value="252" selected>12 mois (cache)</option>
+            <option value="5y">5 ans (téléchargé)</option>
+            <option value="10y">10 ans (téléchargé)</option>
           </select>
           <button class="btn btn-accent" id="backtest-run">Lancer le backtest</button>
         </div>

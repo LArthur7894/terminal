@@ -7,11 +7,35 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import server
 
 
+class TestRangeHelpers(unittest.TestCase):
+    def test_normalize_range_allows_known_and_falls_back(self):
+        for r in ("1y", "2y", "5y", "10y", "max"):
+            self.assertEqual(server._normalize_range(r), r)
+        self.assertEqual(server._normalize_range("3d"), "2y", "plage inconnue → repli 2y")
+        self.assertEqual(server._normalize_range(""), "2y")
+
+    def test_keep_for_range_deep_vs_shallow(self):
+        self.assertEqual(server._keep_for_range("2y"), server.HISTORY_KEEP)
+        self.assertEqual(server._keep_for_range("1y"), server.HISTORY_KEEP)
+        self.assertEqual(server._keep_for_range("5y"), server.HISTORY_KEEP_DEEP)
+        self.assertEqual(server._keep_for_range("max"), server.HISTORY_KEEP_DEEP)
+
+    def test_deep_keep_larger_than_shallow(self):
+        self.assertGreater(server.HISTORY_KEEP_DEEP, server.HISTORY_KEEP)
+
+
 class TestHistoryCache(unittest.TestCase):
     def setUp(self):
         server._HISTORY_CACHE.clear()
 
     tearDown = setUp
+
+    def test_range_scoped_keys_do_not_collide(self):
+        # Une clé "SYM@2y" et "SYM@max" doivent coexister sans s'écraser.
+        server._history_cache_put("AAPL@2y", self._payload(5))
+        server._history_cache_put("AAPL@max", self._payload(50))
+        self.assertEqual(len(server._history_cache_get("AAPL@2y")["closes"]), 5)
+        self.assertEqual(len(server._history_cache_get("AAPL@max")["closes"]), 50)
 
     def _payload(self, n=3):
         return {"dates": [f"2026-01-{i + 1:02d}" for i in range(n)],

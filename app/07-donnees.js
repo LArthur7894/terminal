@@ -85,7 +85,7 @@ async function ensureFxRates() {
  * Renvoie { dates, closes, currency } du plus récent au plus ancien.
  * Lève une erreur typée { type, message }.
  */
-async function fetchDailySeries(ticker, { fresh = false } = {}) {
+async function fetchDailySeries(ticker, { fresh = false, range = null } = {}) {
   if (location.protocol === "file:") {
     throw {
       type: "noserver",
@@ -99,9 +99,11 @@ async function fetchDailySeries(ticker, { fresh = false } = {}) {
   let resp;
   try {
     // `fresh` traverse le cache de 15 min du serveur : réservé aux décisions du bot,
-    // qui doivent porter sur le cours de l'instant.
-    resp = await fetch("/api/history?symbol=" + encodeURIComponent(ticker) + (fresh ? "&fresh=1" : ""),
-                       { signal: ctrl.signal });
+    // qui doivent porter sur le cours de l'instant. `range` (5y/max) sert au backtest
+    // à télécharger un historique profond, jamais persisté (voir 15-backtest.js).
+    const qs = "?symbol=" + encodeURIComponent(ticker)
+      + (fresh ? "&fresh=1" : "") + (range ? "&range=" + encodeURIComponent(range) : "");
+    resp = await fetch("/api/history" + qs, { signal: ctrl.signal });
   } catch (e) {
     clearTimeout(timer);
     if (e.name === "AbortError") {
