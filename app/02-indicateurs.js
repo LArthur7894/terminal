@@ -116,21 +116,30 @@ function ema(values, period) {
   return out;
 }
 
+// Rampe linéaire bornée 0..1 : v ≤ lo → 0, v ≥ hi → 1, interpolé entre. null si v absent.
+// Local à ce module (pas de dépendance à piecewise de 03, chargé après).
+function _ramp(v, lo, hi) {
+  if (v == null || !isFinite(v)) return null;
+  if (v <= lo) return 0;
+  if (v >= hi) return 1;
+  return (v - lo) / (hi - lo);
+}
+
 /**
- * Score d'opportunité 0–100 (plus haut = configuration technique
- * potentiellement plus favorable à l'achat) :
- *   - RSI (0–40 pts)  : survente (≤30) = 40 pts, surachat (≥70) = 0, linéaire entre.
- *   - Croisement SMA (0–30 pts) : golden cross (SMA50 > SMA200) = 30, death cross = 0.
- *   - Range 52 sem. (0–30 pts) : proche du plus bas = 30, proche du plus haut = 0.
- * Composante neutre (moitié des points) si les données manquent.
+ * Score de RETOUR À LA MOYENNE 0–100 : récompense la faiblesse. C'est le score PAR DÉFAUT.
+ *   - RSI (0–40)  : survente (≤30) = 40, surachat (≥70) = 0.
+ *   - Golden cross (0–30) : SMA50 > SMA200 = 30.
+ *   - Range 52 sem. (0–30) : proche du plus BAS = 30.
+ * Validé comme le plus ROBUSTE au backtest walk-forward (positif dans les deux régimes
+ * testés 2021-23 et 2024-26) ; le momentum, lui, perd de l'argent en marché baissier.
  */
-function computeScore(ind) {
+function scoreMeanReversion(ind) {
   let score = 0;
 
   if (ind.rsi !== null) {
     if (ind.rsi <= 30) score += 40;
     else if (ind.rsi >= 70) score += 0;
-    else score += 40 * (70 - ind.rsi) / 40; // linéaire entre 30 et 70
+    else score += 40 * (70 - ind.rsi) / 40;
   } else {
     score += 20;
   }
@@ -144,6 +153,56 @@ function computeScore(ind) {
   score += 30 * (1 - ind.rangePos);
 
   return Math.round(Math.min(100, Math.max(0, score)));
+}
+
+/**
+ * Score de MOMENTUM 0–100 : récompense la FORCE (l'inverse du contrarian). Fondé sur
+ * l'anomalie de momentum, la mieux documentée sur cet horizon. NON activé par défaut :
+ * le backtest walk-forward l'a montré fort en marché haussier (2024-26 : +26 % vs +7 %)
+ * mais perdant en marché baissier (2021-23 : −14 % vs +37 %). Disponible dans le
+ * laboratoire de backtest pour comparaison, pas dans le signal de trading en direct.
+ *   - Structure de tendance (0–35) : cours au-dessus des moyennes, golden cross.
+ *   - Momentum moyen terme (0–35) : rendements 3 et 6 mois positifs et soutenus.
+ *   - Position dans le range 52 sem. (0–30) : proche des plus HAUTS = force, avec un léger
+ *     repli au-delà de 0,97 pour ne pas courir après une parabole.
+ * Neutre (moitié des points) quand une donnée manque.
+ */
+function scoreMomentum(ind) {
+  let score = 0;
+
+  // 1) Structure de tendance
+  if (ind.sma200 != null && ind.price > 0) {
+    if (ind.price > ind.sma200) score += 15;
+    if (ind.sma50 != null && ind.sma50 > ind.sma200) score += 12;
+    if (ind.sma50 != null && ind.price > ind.sma50) score += 8;
+  } else {
+    score += 17.5;
+  }
+
+  // 2) Momentum moyen terme (rendements 3 et 6 mois, en %)
+  const p = ind.perf || {};
+  const parts = [];
+  const r3 = _ramp(p.m3, 0, 20); if (r3 != null) parts.push(r3);
+  const r6 = _ramp(p.m6, 0, 35); if (r6 != null) parts.push(r6);
+  score += (parts.length ? parts.reduce((a, b) => a + b, 0) / parts.length : 0.5) * 35;
+
+  // 3) Position dans le range 52 semaines
+  if (ind.rangePos != null) {
+    const rp = ind.rangePos > 0.97 ? Math.max(0, 0.97 - (ind.rangePos - 0.97)) : ind.rangePos;
+    score += 30 * Math.max(0, Math.min(1, rp));
+  } else {
+    score += 15;
+  }
+
+  return Math.round(Math.min(100, Math.max(0, score)));
+}
+
+// Score technique par défaut de l'app. On a évalué un virage vers le momentum (2026-07) via
+// une comparaison walk-forward au backtest : le momentum gagne en marché haussier mais perd
+// en marché baissier, tandis que le retour à la moyenne reste positif dans les deux régimes.
+// On garde donc ce dernier par défaut. Le momentum reste testable dans le laboratoire.
+function computeScore(ind) {
+  return scoreMeanReversion(ind);
 }
 
 function signalFromScore(score) {

@@ -413,6 +413,13 @@
             <option value="5y">5 ans (téléchargé)</option>
             <option value="10y">10 ans (téléchargé)</option>
           </select>
+          <label for="backtest-strategy">Stratégie</label>
+          <select id="backtest-strategy">
+            <option value="default" selected>Défaut (retour à la moyenne)</option>
+            <option value="momentum">Momentum</option>
+            <option value="momentum_regime">Momentum + filtre de régime</option>
+            <option value="switch">Bascule de régime</option>
+          </select>
           <button class="btn btn-accent" id="backtest-run">Lancer le backtest</button>
         </div>
         <div id="backtest-status" class="hint"></div>

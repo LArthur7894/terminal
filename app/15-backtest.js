@@ -70,6 +70,9 @@ function backtestIndicatorsAsOf(chrono, j, windowLen = 260) {
 // Renvoie { ok, stats, equity, history, benchmarkPct, params } ou { ok:false, reason }.
 function backtestRun(universe, cfg, opts = {}) {
   const warmup = opts.warmup != null ? opts.warmup : 200;
+  // Scoreur technique injectable → permet un A/B (momentum vs retour à la moyenne) sur
+  // exactement les mêmes données. Par défaut, le score par défaut de l'app.
+  const scoreFn = opts.scoreFn || computeScore;
 
   const prepared = [];
   for (const u of universe || []) {
@@ -95,7 +98,9 @@ function backtestRun(universe, cfg, opts = {}) {
   let startIdx = Math.max(0, timeline.length - lookback);
   if (opts.startDate) { const k = timeline.findIndex(d => d >= opts.startDate); if (k >= 0) startIdx = k; }
   if (startIdx < 0) startIdx = 0;
-  const tradeDates = timeline.slice(startIdx);
+  let tradeDates = timeline.slice(startIdx);
+  // Date de fin optionnelle : sert au découpage walk-forward (réglage / hors échantillon).
+  if (opts.endDate) tradeDates = tradeDates.filter(d => d <= opts.endDate);
   if (tradeDates.length < 5) return { ok: false, reason: "Fenêtre trop courte pour un backtest." };
 
   let cash = cfg.capital || 10000;
@@ -107,9 +112,41 @@ function backtestRun(universe, cfg, opts = {}) {
 
   const priceAt = (prep, d) => { const i = prep.idxByDate.get(d); return i == null ? null : prep.chrono.closes[i]; };
 
+  // Filtre de régime : un indice équipondéré de l'univers sert de baromètre du marché.
+  // Régime « risque-on » (achats autorisés) tant que l'indice est au-dessus de sa SMA 200 ;
+  // sinon on cesse d'ouvrir des positions (on continue de gérer et sortir les existantes).
+  // Faute d'historique pour la SMA 200 (début de fenêtre), on laisse passer (true).
+  let regimeOK = null;
+  if (opts.regimeFilter || opts.regimeSwitch) {
+    const first = new Map();
+    const mDates = [], mLevel = [];
+    for (const d of timeline) {
+      let sum = 0, cnt = 0;
+      for (const prep of prepared) {
+        const c = priceAt(prep, d);
+        if (c == null) continue;
+        if (!first.has(prep.ticker)) first.set(prep.ticker, c);
+        sum += c / first.get(prep.ticker); cnt++;
+      }
+      if (cnt) { mDates.push(d); mLevel.push(sum / cnt); }
+    }
+    regimeOK = new Map();
+    for (let i = 0; i < mDates.length; i++) {
+      if (i < 200) { regimeOK.set(mDates[i], true); continue; }
+      let s = 0; for (let k = i - 200; k < i; k++) s += mLevel[k];
+      regimeOK.set(mDates[i], mLevel[i] > s / 200);
+    }
+  }
+
   for (let di = 0; di < tradeDates.length; di++) {
     const d = tradeDates[di];
     const dMs = new Date(d + "T00:00:00Z").getTime();
+
+    // Bascule de régime : momentum quand le marché est haussier, retour à la moyenne quand il
+    // baisse — chaque signal joue là où il excelle. Sinon, le scoreur unique fourni.
+    const dayScore = opts.regimeSwitch
+      ? (regimeOK.get(d) === false ? scoreMeanReversion : scoreMomentum)
+      : scoreFn;
 
     // Apprentissage recalculé périodiquement depuis l'historique accumulé (comme le bot en direct).
     if (cfg.learnEnabled && di % 5 === 0) learn = botComputeLearning(history, cfg, learn);
@@ -129,8 +166,9 @@ function backtestRun(universe, cfg, opts = {}) {
       if (!exit && c != null) {
         const ind = backtestIndicatorsAsOf(prep.chrono, prep.idxByDate.get(d));
         if (ind) {
-          const g = computeGlobalScore({ score: computeScore(ind), fundScore: prep.fundScore });
-          if ((g != null && g <= cfg.exitScore) || signalFromScore(computeScore(ind)) === "Vente") {
+          const sc = dayScore(ind);
+          const g = computeGlobalScore({ score: sc, fundScore: prep.fundScore });
+          if ((g != null && g <= cfg.exitScore) || signalFromScore(sc) === "Vente") {
             exit = { price: c, date: d, reason: "réévaluation" };
           }
         }
@@ -150,7 +188,7 @@ function backtestRun(universe, cfg, opts = {}) {
     }
     positions = stillOpen;
 
-    // --- entrées ---
+    // --- entrées (suspendues en régime baissier si le filtre est actif) ---
     const held = new Set(positions.map(p => p.ticker));
     const exposureByMarket = {};
     let portfolioValue = cash;
@@ -160,14 +198,16 @@ function backtestRun(universe, cfg, opts = {}) {
       exposureByMarket[pos.market] = (exposureByMarket[pos.market] || 0) + v;
     }
 
+    const regimeBloque = opts.regimeFilter && regimeOK.get(d) === false;
+
     const cands = [];
-    for (const prep of prepared) {
+    if (!regimeBloque) for (const prep of prepared) {
       if (held.has(prep.ticker)) continue;
       const j = prep.idxByDate.get(d);
       if (j == null || j < warmup) continue;
       const ind = backtestIndicatorsAsOf(prep.chrono, j);
       if (!ind || !(ind.price > 0)) continue;
-      const score = computeScore(ind);
+      const score = dayScore(ind);
       const entry = { ticker: prep.ticker, ind, score, signal: signalFromScore(score), fund: prep.fund, fundScore: prep.fundScore };
       const g = computeGlobalScore(entry);
       if (g >= cfg.qualityMin) cands.push({ prep, entry, g, close: ind.price });
@@ -325,7 +365,7 @@ function renderBacktestResults(res) {
       <div><dt>Espérance / trade</dt><dd class="${pctClass(s.expectancy)}">${fnum(s.expectancy)} €</dd></div>
       <div><dt>Trades clôturés</dt><dd>${s.n}</dd></div>
     </dl>
-    <p class="hint">${res.params.tickers} titres · ${res.params.days} séances (${fdateShort(res.params.from)} → ${fdateShort(res.params.to)}) · ${res.params.openAtEnd} position(s) encore ouverte(s) en fin de période. Le mélange technique/fondamental suit le curseur de l'onglet Analyse.</p>
+    <p class="hint">${res.strategyLabel ? `Stratégie : <strong>${esc(res.strategyLabel)}</strong> · ` : ""}${res.params.tickers} titres · ${res.params.days} séances (${fdateShort(res.params.from)} → ${fdateShort(res.params.to)}) · ${res.params.openAtEnd} position(s) encore ouverte(s) en fin de période. Le mélange technique/fondamental suit le curseur de l'onglet Analyse.</p>
     <div class="bot-equity-holder"><canvas id="backtest-canvas"></canvas></div>
     ${botGroupTable("Par famille", s.byFamily)}
     ${botGroupTable("Par raison de sortie", s.byReason)}
@@ -360,6 +400,16 @@ function renderBacktestChart(res) {
 // Plafond de titres téléchargés pour un backtest profond : borne le trafic vers Yahoo
 // (chaque titre = une requête) tout en gardant un univers représentatif.
 const BACKTEST_DEEP_CAP = 100;
+
+// Stratégies comparables dans le laboratoire. Chacune se traduit en options du moteur.
+// Le retour à la moyenne (défaut) est le score réellement utilisé par le bot en direct ;
+// les autres ne servent qu'à l'exploration au backtest (voir la note walk-forward de 02).
+const BACKTEST_STRATEGIES = {
+  default:          { label: "retour à la moyenne (défaut du bot)", opts: {} },
+  momentum:         { label: "momentum",                            opts: { scoreFn: scoreMomentum } },
+  momentum_regime:  { label: "momentum + filtre de régime",         opts: { scoreFn: scoreMomentum, regimeFilter: true } },
+  switch:           { label: "bascule de régime",                   opts: { regimeSwitch: true } },
+};
 
 // Télécharge un historique profond (5y/max) pour les titres déjà connus (scan + watchlist),
 // sans rien persister : l'univers profond ne vit que le temps du backtest. Le cache 15 min
@@ -432,21 +482,27 @@ async function runBacktest() {
   // Fenêtre : périodes profondes → tout l'historique téléchargé ; sinon N dernières séances.
   const lookback = deep ? 100000 : (({ "126": 126, "252": 252 })[value] || 252);
 
-  status.textContent = `Rejeu en cours sur ${universe.length} titres…`;
+  // Stratégie choisie (défaut = le score réel du bot).
+  const stratSel = document.getElementById("backtest-strategy");
+  const stratKey = (stratSel && BACKTEST_STRATEGIES[stratSel.value]) ? stratSel.value : "default";
+  const strat = BACKTEST_STRATEGIES[stratKey];
+
+  status.textContent = `Rejeu en cours sur ${universe.length} titres (${strat.label})…`;
   await new Promise(r => setTimeout(r, 30)); // laisse le statut se peindre avant le calcul synchrone
 
   let res;
   try {
-    res = backtestRun(universe, { ...bot.config }, { lookbackTradingDays: lookback });
+    res = backtestRun(universe, { ...bot.config }, { lookbackTradingDays: lookback, ...strat.opts });
   } catch (e) {
     status.textContent = "Erreur pendant le rejeu : " + ((e && e.message) || e);
     btn.disabled = false;
     return;
   }
   status.textContent = res.ok
-    ? `Rejeu terminé — ${res.params.tickers} titres, ${res.params.days} séances.`
+    ? `Rejeu terminé — ${res.params.tickers} titres, ${res.params.days} séances · stratégie : ${strat.label}.`
       + (truncated ? ` (univers limité aux ${BACKTEST_DEEP_CAP} premiers titres).` : "")
     : "";
+  if (res.ok) res.strategyLabel = strat.label;
   renderBacktestResults(res);
   btn.disabled = false;
 }

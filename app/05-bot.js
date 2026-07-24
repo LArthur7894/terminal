@@ -99,6 +99,48 @@ function botSelfTest() {
   return { pass, fail, total, report };
 }
 
+/* ---------- tests : score technique (momentum) ---------- */
+
+// Fixtures d'indicateurs représentant une tendance forte et une tendance cassée.
+function scoreMkStrong() {
+  return { price: 150, sma50: 140, sma200: 120, rangePos: 0.85, rsi: 62,
+           perf: { m1: 5, m3: 12, m6: 25, y1: 40 } };
+}
+function scoreMkWeak() {
+  return { price: 80, sma50: 90, sma200: 110, rangePos: 0.12, rsi: 28,
+           perf: { m1: -6, m3: -18, m6: -30, y1: -45 } };
+}
+
+botTest("momentum : récompense la force, punit la faiblesse", () => {
+  botAssert(scoreMomentum(scoreMkStrong()) >= 65, "une tendance forte doit scorer haut (achat)");
+  botAssert(scoreMomentum(scoreMkWeak()) <= 35, "une tendance cassée doit scorer bas (vente)");
+});
+
+botTest("momentum : oriente à l'INVERSE du retour à la moyenne", () => {
+  // Le titre battu : contrarian le note haut (creux à acheter), momentum le note bas.
+  const weak = scoreMkWeak();
+  botAssert(scoreMeanReversion(weak) > scoreMomentum(weak), "sur un titre effondré, contrarian > momentum");
+  const strong = scoreMkStrong();
+  botAssert(scoreMomentum(strong) > scoreMeanReversion(strong), "sur un titre en tendance, momentum > contrarian");
+});
+
+botTest("momentum : croît avec le rendement récent", () => {
+  const base = scoreMkStrong();
+  const mou = scoreMomentum({ ...base, perf: { m3: 2, m6: 3 } });
+  const fort = scoreMomentum({ ...base, perf: { m3: 15, m6: 30 } });
+  botAssert(fort > mou, "un momentum plus vif doit donner un meilleur score");
+});
+
+botTest("momentum : données manquantes → ni achat ni vente franc", () => {
+  const s = scoreMomentum({ price: 100, sma50: null, sma200: null, rangePos: null, perf: {} });
+  botAssert(s > 35 && s < 65, "sans données, score neutre");
+});
+
+botTest("computeScore = retour à la moyenne (défaut robuste, validé walk-forward)", () => {
+  const ind = scoreMkStrong();
+  botAssertEq(computeScore(ind), scoreMeanReversion(ind), "le score par défaut reste le retour à la moyenne");
+});
+
 /* ---------- tests : sessions ---------- */
 
 botTest("botMarketOf: suffixes", () => {
